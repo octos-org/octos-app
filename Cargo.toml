@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+    "app",
+    "crates/octos-app-store",
+    "crates/octos-app-transport",
+    "crates/octos-app-render",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["octos-app contributors"]
+
+[workspace.dependencies]
+# Internal
+octos-app-store     = { path = "crates/octos-app-store" }
+octos-app-transport = { path = "crates/octos-app-transport" }
+octos-app-render    = { path = "crates/octos-app-render" }
+
+# Octos protocol types — path dep during dev; pinned to git tag for releases.
+octos-core = { path = "../octos/crates/octos-core" }
+
+# Async / wire
+tokio              = { version = "1", features = ["rt", "macros", "net", "time", "sync"] }
+tokio-tungstenite  = { version = "0.24", features = ["rustls-tls-native-roots"] }
+futures-util       = "0.3"
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+uuid               = { version = "1", features = ["v4", "serde"] }
+chrono             = { version = "0.4", features = ["serde"] }
+url                = "2"
+reqwest            = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
+
+# Storage / OS integration
+keyring  = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+log      = "0.4"
+
+# External kits (streaming-markdown-kit, makepad-diagram-kit) pull
+# makepad-widgets from the ZhangHanDong/makepad git URL on their `dev` branch.
+# We path-dep the same fork at ../aichat. Without this patch Cargo resolves
+# two makepad-widgets / makepad-script graphs and types stop matching.
+# Mirrors aichat's own [patch] block at ~/home/aichat/Cargo.toml.
+[patch."https://github.com/ZhangHanDong/makepad.git"]
+makepad-widgets = { path = "../aichat/widgets" }
+
+[profile.release]
+lto              = "fat"
+codegen-units    = 1
+panic            = "abort"
+strip            = "symbols"
+
+# Workspace-wide clippy policy. CI runs `cargo clippy --workspace
+# --all-targets -- -D warnings`; the allows below cover lints that are real
+# but tracked under separate workstreams. Removing any allow here without a
+# follow-up PR will fail CI by design.
+#   - `result_large_err` / `large_enum_variant`: Event / LifecycleResult
+#     carry full protocol payloads inline; boxing is W01 follow-up.
+#   - `derivable_impls` / `unnecessary_get_then_check`: clippy-1.95 style
+#     nits in legacy store code; clean-up tracked separately, not blocking.
+[workspace.lints.clippy]
+result_large_err = "allow"
+large_enum_variant = "allow"
+derivable_impls = "allow"
+unnecessary_get_then_check = "allow"
+collapsible_match = "allow"
