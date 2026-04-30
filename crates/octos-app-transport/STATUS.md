@@ -70,9 +70,9 @@ JSON-RPC framing, notification typing, and the durable/ephemeral router).
    currently fail on the first network error. We should add a small retry
    loop (3 attempts, full-jitter, ≤ 5 s total) for the cold-start probes;
    anything still failing after that bubbles up as a banner.
-4. **`tool/result` wire shape.** `OutboundCommand::SendToolResult` emits a
-   notification-shaped frame as a placeholder; the actual method name and
-   schema are W04's call.
+4. **`tool/result` wire shape.** AppUI has no stable `tool/result` command yet,
+   so the transport intentionally does not emit that non-contract method.
+   Add it only after the AppUI contract defines the method and payload.
 5. **Capability flags on the upgrade query string.** W01 plan calls for
    `?pane_snapshots=1&approval_typed=1` query params; today the headers do
    the work and the server ignores the query. Add when W04 needs the

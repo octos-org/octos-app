@@ -256,7 +256,7 @@ async fn run_live(
                 };
                 match frame {
                     Ok(WsMessage::Text(text)) => {
-                        if let Some(t) = handle_text_frame(&text, shared, events, &mut state) {
+                        if let Some(t) = handle_text_frame(&text, shared, events, &mut state).await {
                             try_emit(events, TransportEvent::ConnectionState(t));
                         }
                     }
@@ -320,20 +320,6 @@ where
         OutboundCommand::RequestTaskOutput { params, reply } => {
             (methods::TASK_OUTPUT_READ, to_value(&params), Some(PendingReply::TaskOutput(reply)))
         }
-        OutboundCommand::SendToolResult { tool_call_id, result } => {
-            // Best-effort: `tool/result` is not yet a stable wire method.
-            let frame = serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "tool/result",
-                "params": { "tool_call_id": tool_call_id, "result": result },
-            }))
-            .unwrap_or_default();
-            return if ws_tx.send(WsMessage::Text(frame)).await.is_err() {
-                CommandOutcome::SocketError
-            } else {
-                CommandOutcome::Continue
-            };
-        }
         OutboundCommand::Disconnect => return CommandOutcome::Disconnect,
     };
 
@@ -359,7 +345,7 @@ fn to_value<T: serde::Serialize>(v: &T) -> Value {
 
 /// Inbound text-frame dispatcher. Returns `Some(new_state)` if the frame
 /// implies a `ConnectionState` transition the outer loop should announce.
-fn handle_text_frame(
+async fn handle_text_frame(
     text: &str,
     shared: &mut SharedState,
     events: &mpsc::Sender<TransportEvent>,
@@ -374,7 +360,7 @@ fn handle_text_frame(
     };
     match env {
         RpcEnvelope::Notification(n) => {
-            handle_notification(&n.method, n.params, shared, events);
+            handle_notification(&n.method, n.params, shared, events).await;
             None
         }
         RpcEnvelope::Response(r) => match shared.pending.remove(&r.id) {
@@ -487,7 +473,7 @@ fn fail_pending(pending: PendingRequest, err: RpcError) {
     }
 }
 
-fn handle_notification(
+async fn handle_notification(
     method: &str,
     params: Value,
     shared: &mut SharedState,
@@ -516,7 +502,13 @@ fn handle_notification(
             shared.set_cursor(session_id, c);
         }
     }
-    try_emit(events, TransportEvent::DurableNotification { payload, cursor });
+    if events
+        .send(TransportEvent::DurableNotification { payload, cursor })
+        .await
+        .is_err()
+    {
+        log::warn!("transport: event channel closed while delivering durable notification");
+    }
 }
 
 fn notification_session(notification: &UiNotification) -> Option<&SessionKey> {
@@ -641,8 +633,8 @@ mod tests {
         assert_eq!(shared.cursor_for_session(&session_id), Some(latest));
     }
 
-    #[test]
-    fn replay_lossy_notification_uses_last_durable_cursor() {
+    #[tokio::test]
+    async fn replay_lossy_notification_uses_last_durable_cursor() {
         let (tx, mut rx) = mpsc::channel(1);
         let mut shared = SharedState::new(None);
 
@@ -658,7 +650,8 @@ mod tests {
             }),
             &mut shared,
             &tx,
-        );
+        )
+        .await;
 
         assert_eq!(
             shared.cursor_for_session(&SessionKey("local:test".into())),

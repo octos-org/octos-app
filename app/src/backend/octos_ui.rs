@@ -19,9 +19,12 @@ use octos_app_transport::{
     ws, Capabilities, ConnectionState, LifecycleResult, OutboundCommand, TransportConfig,
     TransportEvent,
 };
-use octos_core::ui_protocol::{
-    InputItem, SessionOpenParams, TurnInterruptParams, TurnStartParams, UiCursor, UiNotification,
+use octos_core::app_ui::{
+    AppUiBackendEvent as UiNotification, AppUiInputItem as InputItem,
+    AppUiInterruptTurn as TurnInterruptParams, AppUiOpenSession as SessionOpenParams,
+    AppUiSubmitPrompt as TurnStartParams,
 };
+use octos_core::ui_protocol::UiCursor;
 use octos_core::{ui_protocol::TurnId, SessionKey};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -394,17 +397,11 @@ impl Agent for OctosUiAgent {
         result: &str,
         is_error: bool,
     ) {
-        // Best-effort placeholder — `tool/result` is not a stable wire method
-        // yet (octos-app-transport flags this on `OutboundCommand::SendToolResult`).
-        // W04+W05 will refine the shape once the server contract lands.
-        let payload = serde_json::json!({
-            "content": result,
-            "is_error": is_error,
-        });
-        self.post(OutboundCommand::SendToolResult {
-            tool_call_id: tool_use_id.to_owned(),
-            result: payload,
-        });
+        log::warn!(
+            "octos-ui-agent: dropping tool result for {tool_use_id}; \
+             AppUI has no stable tool/result command yet"
+        );
+        let _ = (result, is_error);
     }
 
     fn cancel_prompt(&mut self, _cx: &mut Cx, prompt_id: PromptId) {

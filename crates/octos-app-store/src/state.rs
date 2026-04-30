@@ -13,8 +13,9 @@ use crate::tasks::{Task, ToolCall, ToolCallId};
 use crate::toasts::{Toast, ToastKind, ToastQueue};
 use crate::turns::Turn;
 use chrono::Utc;
-// see octos-core ui_protocol.rs:62 (UiCursor), :69 (TurnId), :1577 (UiNotification)
-use octos_core::ui_protocol::{TaskRuntimeState, TurnId, UiCursor, UiNotification};
+use octos_core::app_ui::AppUiBackendEvent as UiNotification;
+// see octos-core ui_protocol.rs:62 (UiCursor), :69 (TurnId)
+use octos_core::ui_protocol::{TaskRuntimeState, TurnId, UiCursor};
 use octos_core::{SessionKey, TaskId};
 use std::collections::HashMap;
 

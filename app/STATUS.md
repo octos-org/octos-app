@@ -42,8 +42,8 @@ calls `octos_app_transport::ws::spawn`, capturing the
 mints a `PromptId` + `TurnId`, registers both directions of the
 prompt↔turn map, and posts `StartTurn` carrying an `InputItem::Text`.
 `cancel_prompt` translates a `PromptId` back to its `TurnId` and posts
-`InterruptTurn`; `send_tool_result` wraps the body as
-`{content, is_error}` and posts the placeholder `SendToolResult`.
+`InterruptTurn`; `send_tool_result` currently drops the body with a warning
+because AppUI has no stable `tool/result` command.
 `handle_event` drains `evt_rx` non-blockingly via `try_recv` and
 translates `TransportEvent`s: `RpcResult(SessionOpen)` flips
 `is_session_ready` and emits `AgentEvent::SessionReady`;
