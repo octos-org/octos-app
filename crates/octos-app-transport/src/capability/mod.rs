@@ -13,7 +13,7 @@ use serde_json::Value;
 pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1 as APPROVAL_TYPED_V1;
 // see octos-core ui_protocol.rs:32
 pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1 as PANE_SNAPSHOTS_V1;
-// see octos-core ui_protocol.rs:33
+// see octos-core ui_protocol.rs:36
 pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1 as SESSION_WORKSPACE_CWD_V1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,7 +27,7 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Default desired capabilities — request both known flags.
+    /// Default desired capabilities — request every client-supported flag.
     pub fn requested() -> Self {
         Self {
             typed_approvals: true,
@@ -37,8 +37,8 @@ impl Capabilities {
         }
     }
 
-    /// Deterministic header value for `X-Octos-Ui-Features`.
-    pub fn feature_header_value(&self) -> String {
+    /// Feature names to request during the WS handshake.
+    pub fn requested_features(&self) -> Vec<String> {
         let mut features = Vec::new();
         if self.typed_approvals {
             features.push(APPROVAL_TYPED_V1.to_owned());
@@ -49,16 +49,22 @@ impl Capabilities {
         if self.session_workspace_cwd {
             features.push(SESSION_WORKSPACE_CWD_V1.to_owned());
         }
-        for (name, value) in &self.raw {
-            if value.as_bool().unwrap_or(false)
-                && name != APPROVAL_TYPED_V1
-                && name != PANE_SNAPSHOTS_V1
-                && name != SESSION_WORKSPACE_CWD_V1
-            {
-                features.push(name.clone());
+        for (feature, enabled) in &self.raw {
+            if enabled.as_bool() == Some(true) && !features.iter().any(|f| f == feature) {
+                features.push(feature.clone());
             }
         }
-        features.join(", ")
+        features
+    }
+
+    /// Value for `X-Octos-Ui-Features`.
+    pub fn handshake_header_value(&self) -> Option<String> {
+        let features = self.requested_features();
+        if features.is_empty() {
+            None
+        } else {
+            Some(features.join(", "))
+        }
     }
 
     /// Build from the server's `supported_features` list (see octos-core
@@ -155,10 +161,12 @@ mod tests {
     }
 
     #[test]
-    fn requested_feature_header_is_deterministic() {
+    fn requested_features_format_handshake_header() {
+        let mut caps = Capabilities::requested();
+        caps.raw.insert("future.v1".into(), Value::Bool(true));
         assert_eq!(
-            Capabilities::requested().feature_header_value(),
-            "approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1"
+            caps.handshake_header_value().as_deref(),
+            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, future.v1")
         );
     }
 }

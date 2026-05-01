@@ -9,11 +9,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
+use octos_core::app_ui::AppUiBackendEvent as UiNotification;
 use octos_core::ui_protocol::{
     methods, ApprovalRespondResult, DiffPreviewGetResult, RpcError, TaskOutputReadResult,
-    UiCursor, UiNotification, UiRpcResult,
+    UiCursor, UiRpcResult,
 };
-use octos_core::SessionKey;
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, MissedTickBehavior};
@@ -65,32 +65,18 @@ enum PendingReply {
 }
 
 struct SharedState {
-    initial_cursor: Option<UiCursor>,
-    cursors: HashMap<SessionKey, UiCursor>,
+    cursor: Option<UiCursor>,
     pending: HashMap<JsonRpcId, PendingRequest>,
     registry: Arc<RpcRegistry>,
 }
 
 impl SharedState {
-    fn new(initial_cursor: Option<UiCursor>) -> Self {
+    fn new(cursor: Option<UiCursor>) -> Self {
         Self {
-            initial_cursor,
-            cursors: HashMap::new(),
+            cursor,
             pending: HashMap::new(),
             registry: Arc::new(RpcRegistry::new()),
         }
-    }
-
-    fn cursor_for_session(&self, session_id: &SessionKey) -> Option<UiCursor> {
-        self.cursors
-            .get(session_id)
-            .cloned()
-            .or_else(|| self.initial_cursor.clone())
-    }
-
-    fn set_cursor(&mut self, session_id: &SessionKey, cursor: UiCursor) {
-        self.initial_cursor = None;
-        self.cursors.insert(session_id.clone(), cursor);
     }
 }
 
@@ -129,13 +115,12 @@ fn build_request(
         "x-profile-id",
         profile.0.parse().map_err(|e| format!("profile header: {e}"))?,
     );
-    let feature_header = requested_capabilities.feature_header_value();
-    if !feature_header.is_empty() {
+    if let Some(features) = requested_capabilities.handshake_header_value() {
         h.insert(
             "x-octos-ui-features",
-            feature_header
+            features
                 .parse()
-                .map_err(|e| format!("features header: {e}"))?,
+                .map_err(|e| format!("ui features header: {e}"))?,
         );
     }
     Ok(req)
@@ -156,6 +141,20 @@ fn try_emit(events: &mpsc::Sender<TransportEvent>, evt: TransportEvent) {
             log::warn!("transport: event channel full, dropping frame");
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {}
+    }
+}
+
+async fn emit_durable_notification(
+    events: &mpsc::Sender<TransportEvent>,
+    payload: UiNotification,
+    cursor: Option<UiCursor>,
+) {
+    if events
+        .send(TransportEvent::DurableNotification { payload, cursor })
+        .await
+        .is_err()
+    {
+        log::debug!("transport: event receiver closed while sending durable notification");
     }
 }
 
@@ -256,7 +255,7 @@ async fn run_live(
                 };
                 match frame {
                     Ok(WsMessage::Text(text)) => {
-                        if let Some(t) = handle_text_frame(&text, shared, events, &mut state) {
+                        if let Some(t) = handle_text_frame(&text, shared, events, &mut state).await {
                             try_emit(events, TransportEvent::ConnectionState(t));
                         }
                     }
@@ -305,7 +304,7 @@ where
         OutboundCommand::OpenSession(mut params) => {
             // Resume bracket: replay from the last in-memory cursor when one exists.
             if params.after.is_none() {
-                params.after = shared.cursor_for_session(&params.session_id);
+                params.after = shared.cursor.clone();
             }
             (methods::SESSION_OPEN, to_value(&params), Some(PendingReply::Lifecycle))
         }
@@ -319,20 +318,6 @@ where
         }
         OutboundCommand::RequestTaskOutput { params, reply } => {
             (methods::TASK_OUTPUT_READ, to_value(&params), Some(PendingReply::TaskOutput(reply)))
-        }
-        OutboundCommand::SendToolResult { tool_call_id, result } => {
-            // Best-effort: `tool/result` is not yet a stable wire method.
-            let frame = serde_json::to_string(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "method": "tool/result",
-                "params": { "tool_call_id": tool_call_id, "result": result },
-            }))
-            .unwrap_or_default();
-            return if ws_tx.send(WsMessage::Text(frame)).await.is_err() {
-                CommandOutcome::SocketError
-            } else {
-                CommandOutcome::Continue
-            };
         }
         OutboundCommand::Disconnect => return CommandOutcome::Disconnect,
     };
@@ -359,7 +344,7 @@ fn to_value<T: serde::Serialize>(v: &T) -> Value {
 
 /// Inbound text-frame dispatcher. Returns `Some(new_state)` if the frame
 /// implies a `ConnectionState` transition the outer loop should announce.
-fn handle_text_frame(
+async fn handle_text_frame(
     text: &str,
     shared: &mut SharedState,
     events: &mpsc::Sender<TransportEvent>,
@@ -374,7 +359,7 @@ fn handle_text_frame(
     };
     match env {
         RpcEnvelope::Notification(n) => {
-            handle_notification(&n.method, n.params, shared, events);
+            handle_notification(&n.method, n.params, shared, events).await;
             None
         }
         RpcEnvelope::Response(r) => match shared.pending.remove(&r.id) {
@@ -487,7 +472,7 @@ fn fail_pending(pending: PendingRequest, err: RpcError) {
     }
 }
 
-fn handle_notification(
+async fn handle_notification(
     method: &str,
     params: Value,
     shared: &mut SharedState,
@@ -507,38 +492,10 @@ fn handle_notification(
     let cursor = params
         .get("cursor")
         .and_then(|v| serde_json::from_value::<UiCursor>(v.clone()).ok());
-    let cursor = cursor.or_else(|| match &payload {
-        UiNotification::ReplayLossy(event) => event.last_durable_cursor.clone(),
-        _ => None,
-    });
     if let Some(c) = cursor.clone() {
-        if let Some(session_id) = notification_session(&payload) {
-            shared.set_cursor(session_id, c);
-        }
+        shared.cursor = Some(c);
     }
-    try_emit(events, TransportEvent::DurableNotification { payload, cursor });
-}
-
-fn notification_session(notification: &UiNotification) -> Option<&SessionKey> {
-    match notification {
-        UiNotification::SessionOpened(event) => Some(&event.session_id),
-        UiNotification::TurnStarted(event) => Some(&event.session_id),
-        UiNotification::TurnCompleted(event) => Some(&event.session_id),
-        UiNotification::TurnError(event) => Some(&event.session_id),
-        UiNotification::MessageDelta(event) => Some(&event.session_id),
-        UiNotification::ToolStarted(event) => Some(&event.session_id),
-        UiNotification::ToolProgress(event) => Some(&event.session_id),
-        UiNotification::ToolCompleted(event) => Some(&event.session_id),
-        UiNotification::ApprovalRequested(event) => Some(&event.session_id),
-        UiNotification::ApprovalAutoResolved(event) => Some(&event.session_id),
-        UiNotification::ApprovalDecided(event) => Some(&event.session_id),
-        UiNotification::ApprovalCancelled(event) => Some(&event.session_id),
-        UiNotification::TaskUpdated(event) => Some(&event.session_id),
-        UiNotification::TaskOutputDelta(event) => Some(&event.session_id),
-        UiNotification::ProgressUpdated(event) => Some(&event.session_id),
-        UiNotification::ReplayLossy(event) => Some(&event.session_id),
-        UiNotification::Warning(event) => Some(&event.session_id),
-    }
+    emit_durable_notification(events, payload, cursor).await;
 }
 
 /// Sleep on backoff. Returns `true` to retry, `false` if the cumulative
@@ -610,68 +567,20 @@ mod tests {
     }
 
     #[test]
-    fn build_request_declares_requested_features() {
+    fn build_request_sends_requested_capability_header() {
         let base = url::Url::parse("https://example.test").unwrap();
-        let request = build_request(
+        let req = build_request(
             &base,
-            &SecretString::new("token"),
-            &ProfileId::new("profile"),
+            &SecretString::new("tk"),
+            &ProfileId::new("p1"),
             &Capabilities::requested(),
         )
-        .expect("request builds");
-
+        .unwrap();
         assert_eq!(
-            request
-                .headers()
+            req.headers()
                 .get("x-octos-ui-features")
-                .and_then(|value| value.to_str().ok()),
+                .and_then(|v| v.to_str().ok()),
             Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1")
-        );
-    }
-
-    #[test]
-    fn shared_state_prefers_session_cursor_over_initial_cursor() {
-        let initial = UiCursor { stream: "session_events".into(), seq: 1 };
-        let latest = UiCursor { stream: "session_events".into(), seq: 9 };
-        let session_id = SessionKey("local:test".into());
-        let mut shared = SharedState::new(Some(initial.clone()));
-
-        assert_eq!(shared.cursor_for_session(&session_id), Some(initial));
-        shared.set_cursor(&session_id, latest.clone());
-        assert_eq!(shared.cursor_for_session(&session_id), Some(latest));
-    }
-
-    #[test]
-    fn replay_lossy_notification_uses_last_durable_cursor() {
-        let (tx, mut rx) = mpsc::channel(1);
-        let mut shared = SharedState::new(None);
-
-        handle_notification(
-            methods::REPLAY_LOSSY,
-            serde_json::json!({
-                "session_id": "local:test",
-                "dropped_count": 2,
-                "last_durable_cursor": {
-                    "stream": "session_events",
-                    "seq": 14
-                }
-            }),
-            &mut shared,
-            &tx,
-        );
-
-        assert_eq!(
-            shared.cursor_for_session(&SessionKey("local:test".into())),
-            Some(UiCursor { stream: "session_events".into(), seq: 14 })
-        );
-        let event = rx.try_recv().expect("durable event");
-        let TransportEvent::DurableNotification { payload, cursor } = event else {
-            panic!("expected durable notification");
-        };
-        assert!(matches!(payload, UiNotification::ReplayLossy(_)));
-        assert_eq!(
-            cursor,
-            Some(UiCursor { stream: "session_events".into(), seq: 14 })
         );
     }
 

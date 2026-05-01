@@ -71,10 +71,13 @@ impl ApprovalsSlice {
         }
     }
 
-    /// Server cancelled the pending approval before a response could land.
+    /// Server cancelled the pending approval before a client decision. Keep
+    /// the payload for history rendering, but remove it from the actionable
+    /// queue.
     pub fn cancelled(&mut self, id: &ApprovalId, reason: impl Into<String>) {
         if self.by_id.contains_key(id) {
-            self.state.insert(id.clone(), ApprovalState::Failed(reason.into()));
+            self.state
+                .insert(id.clone(), ApprovalState::Failed(format!("cancelled: {}", reason.into())));
             self.pending_order.retain(|x| x != id);
         }
     }
@@ -142,20 +145,6 @@ mod tests {
         assert!(matches!(s.state_for(&id), Some(ApprovalState::Failed(_))));
     }
 
-    #[test]
-    fn cancelled_clears_pending_order() {
-        let mut s = ApprovalsSlice::new();
-        let id = ApprovalId(Uuid::from_u128(1));
-        s.requested(ev(&id));
-        s.cancelled(&id, "turn_interrupted");
-
-        assert_eq!(s.pending_count(), 0);
-        assert!(matches!(
-            s.state_for(&id),
-            Some(ApprovalState::Failed(reason)) if reason == "turn_interrupted"
-        ));
-    }
-
     /// W05 follow-up #2: the `-32011 APPROVAL_NOT_PENDING` retry collapse
     /// path replays `decided` after the first decision; a duplicate
     /// `requested` event (e.g. from cursor replay on reconnect) must not
@@ -179,5 +168,16 @@ mod tests {
             s.state_for(&id),
             Some(ApprovalState::Decided { decision: ApprovalDecision::Approve })
         ));
+    }
+
+    #[test]
+    fn cancelled_removes_pending_but_keeps_history() {
+        let mut s = ApprovalsSlice::new();
+        let id = ApprovalId(Uuid::from_u128(2));
+        s.requested(ev(&id));
+        s.cancelled(&id, "turn_interrupted");
+        assert_eq!(s.pending_count(), 0);
+        assert!(matches!(s.state_for(&id), Some(ApprovalState::Failed(msg)) if msg == "cancelled: turn_interrupted"));
+        assert!(s.by_id.contains_key(&id));
     }
 }

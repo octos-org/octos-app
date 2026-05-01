@@ -5,7 +5,7 @@
 //!
 //! Wire contract: `~/home/octos-app/03-PROTOCOL-CONTRACT.md`
 //! Workstream: `~/home/octos-app/workstreams/W01-protocol-client.md`
-//! Source of truth for types: `octos_core::ui_protocol`
+//! Source of truth for app-facing types: `octos_core::app_ui`
 
 pub mod capability;
 pub mod cursor;
@@ -15,11 +15,15 @@ pub mod ws;
 
 use std::collections::BTreeMap;
 
+use octos_core::app_ui::{
+    AppUiBackendEvent as UiNotification, AppUiGetDiffPreview as DiffPreviewGetParams,
+    AppUiInterruptTurn as TurnInterruptParams, AppUiOpenSession as SessionOpenParams,
+    AppUiReadTaskOutput as TaskOutputReadParams, AppUiRespondApproval as ApprovalRespondParams,
+    AppUiSubmitPrompt as TurnStartParams,
+};
 use octos_core::ui_protocol::{
-    ApprovalRespondParams, ApprovalRespondResult, DiffPreviewGetParams, DiffPreviewGetResult,
-    RpcError, SessionOpenParams, SessionOpenResult, TaskOutputReadParams, TaskOutputReadResult,
-    TurnInterruptParams, TurnInterruptResult, TurnStartParams, TurnStartResult, UiCursor,
-    UiNotification,
+    ApprovalRespondResult, DiffPreviewGetResult, RpcError, SessionOpenResult,
+    TaskOutputReadResult, TurnInterruptResult, TurnStartResult, UiCursor,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -76,6 +80,8 @@ pub struct TransportConfig {
     /// Last-applied cursor; `None` means "subscribe live, no replay".
     pub cursor: Option<UiCursor>,
     pub requested_capabilities: Capabilities,
+    /// Per-session workspace cwd to request during `session/open`.
+    pub workspace_cwd: Option<String>,
 }
 
 /// Commands the rest of the app sends to the transport.
@@ -99,12 +105,6 @@ pub enum OutboundCommand {
     FetchDiffPreview {
         params: DiffPreviewGetParams,
         reply: oneshot::Sender<Result<DiffPreviewGetResult, RpcError>>,
-    },
-    /// Send a tool result back. Wire shape not yet stable in octos-core —
-    /// placeholder until W04 lands the concrete `tool/result` method.
-    SendToolResult {
-        tool_call_id: String,
-        result: serde_json::Value,
     },
     /// Read task output (see octos-core ui_protocol.rs:634).
     RequestTaskOutput {

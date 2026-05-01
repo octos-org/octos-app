@@ -2409,6 +2409,9 @@ pub struct App {
     /// Cheap-clone (`Sender<OutboundCommand>` + `tokio::runtime::Handle`).
     #[rust]
     approval_handle: Option<crate::backend::octos_ui::ApprovalHandle>,
+    /// One-shot `task/output/read` handle for the coding task drill-down.
+    #[rust]
+    task_output_handle: Option<crate::backend::octos_ui::TaskOutputHandle>,
 }
 
 impl App {
@@ -2423,10 +2426,15 @@ impl App {
     /// the box hides the concrete type).
     fn create_octos_agent(
         transport_config: TransportConfig,
-    ) -> (Box<dyn Agent>, crate::backend::octos_ui::ApprovalHandle) {
+    ) -> (
+        Box<dyn Agent>,
+        crate::backend::octos_ui::ApprovalHandle,
+        crate::backend::octos_ui::TaskOutputHandle,
+    ) {
         let agent = OctosUiAgent::new(transport_config);
-        let handle = agent.approval_handle();
-        (Box::new(agent) as Box<dyn Agent>, handle)
+        let approval_handle = agent.approval_handle();
+        let task_output_handle = agent.task_output_handle();
+        (Box::new(agent) as Box<dyn Agent>, approval_handle, task_output_handle)
     }
 
     /// Build a `RestClient` from a `TransportConfig`. Used by W04 to hydrate
@@ -2521,6 +2529,7 @@ impl App {
                     profile_id,
                     cursor: None,
                     requested_capabilities: Capabilities::requested(),
+                    workspace_cwd: Self::current_workspace_cwd(),
                 };
             } else {
                 log::warn!(
@@ -2546,7 +2555,14 @@ impl App {
             profile_id,
             cursor: None,
             requested_capabilities: Capabilities::requested(),
+            workspace_cwd: Self::current_workspace_cwd(),
         }
+    }
+
+    fn current_workspace_cwd() -> Option<String> {
+        std::env::current_dir()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned())
     }
 
     /// Resolve the bearer token for `(host, profile_id)`. `OCTOS_APP_TOKEN`
@@ -2857,17 +2873,19 @@ impl App {
         else {
             return;
         };
-        let _params = crate::app::coding::build_output_read_params(session_id, task_id);
-        // TODO(W06.taskoutput.transport): plumb the agent's
-        // `cmd_tx` into a TaskOutputHandle (mirror W05's
-        // `ApprovalHandle`) so we can issue
-        // `OutboundCommand::RequestTaskOutput { params, reply }` and
-        // forward the reply as a `TaskOutputAction::Loaded`. For
-        // now the rolling buffer fills opportunistically from the
-        // `task/output/delta` stream that already lands via
-        // `OctosUiAgent::translate` — see open question 3 in W06 §
-        // "Open questions" ("keep delta alive when navigating
-        // away?"). Empty / cold sessions render the empty state.
+        let params =
+            crate::app::coding::build_output_read_params(session_id.clone(), task_id.clone());
+        if let Some(handle) = self.task_output_handle.as_ref() {
+            handle.read(params);
+        } else {
+            Cx::post_action(crate::app::coding::TaskOutputAction {
+                task_id,
+                session_id,
+                outcome: crate::app::coding::TaskOutputOutcome::Failed(
+                    "agent not initialized".to_owned(),
+                ),
+            });
+        }
     }
 
     /// Spawn the off-thread REST hydrate. Reads filter / search from
@@ -3758,9 +3776,11 @@ impl MatchEvent for App {
         // don't stall `handle_startup`.
         Self::probe_version(Self::build_rest_client(&transport_config));
         sessions_mod::hydrate_sessions(rest_client, fallback_profile);
-        let (agent, approval_handle) = Self::create_octos_agent(transport_config);
+        let (agent, approval_handle, task_output_handle) =
+            Self::create_octos_agent(transport_config);
         self.agent = Some(agent);
         self.approval_handle = Some(approval_handle);
+        self.task_output_handle = Some(task_output_handle);
 
         // Profile dropdown. W08 will populate `available_profiles` from
         // `/api/my/profile`; for M1 we hand the dropdown the stub label

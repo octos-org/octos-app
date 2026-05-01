@@ -19,8 +19,13 @@ use octos_app_transport::{
     ws, Capabilities, ConnectionState, LifecycleResult, OutboundCommand, TransportConfig,
     TransportEvent,
 };
+use octos_core::app_ui::{
+    AppUiBackendEvent as UiNotification, AppUiInputItem as InputItem,
+    AppUiInterruptTurn as TurnInterruptParams, AppUiOpenSession as SessionOpenParams,
+    AppUiSubmitPrompt as TurnStartParams,
+};
 use octos_core::ui_protocol::{
-    InputItem, SessionOpenParams, TurnInterruptParams, TurnStartParams, UiCursor, UiNotification,
+    ApprovalDecision, ApprovalId, ApprovalRespondParams, TaskOutputReadParams, UiCursor,
 };
 use octos_core::{ui_protocol::TurnId, SessionKey};
 use tokio::runtime::Runtime;
@@ -62,6 +67,8 @@ pub struct OctosUiAgent {
     /// `CapabilityNegotiated` arrives.
     #[allow(dead_code)]
     capabilities: Option<Capabilities>,
+    /// Workspace cwd requested for every `session/open`, when configured.
+    workspace_cwd: Option<String>,
 }
 
 impl OctosUiAgent {
@@ -74,6 +81,7 @@ impl OctosUiAgent {
     /// `is_session_ready` stays `false` forever — matching M1's "boots even
     /// without a server" requirement.
     pub fn new(config: TransportConfig) -> Self {
+        let workspace_cwd = config.workspace_cwd.clone();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -94,6 +102,7 @@ impl OctosUiAgent {
             prompt_ids: HashMap::new(),
             connection_state: ConnectionState::Idle,
             capabilities: None,
+            workspace_cwd,
         }
     }
 
@@ -125,6 +134,16 @@ impl OctosUiAgent {
     /// agent itself is held behind `Box<dyn Agent>`.
     pub fn approval_handle(&self) -> ApprovalHandle {
         ApprovalHandle {
+            cmd_tx: self.cmd_tx.clone(),
+            runtime: self._runtime.handle().clone(),
+        }
+    }
+
+    /// Cheap handle for one-shot `task/output/read` requests from the coding
+    /// workspace. Mirrors `approval_handle` so UI code does not downcast the
+    /// boxed `Agent`.
+    pub fn task_output_handle(&self) -> TaskOutputHandle {
+        TaskOutputHandle {
             cmd_tx: self.cmd_tx.clone(),
             runtime: self._runtime.handle().clone(),
         }
@@ -361,7 +380,7 @@ impl Agent for OctosUiAgent {
         self.post(OutboundCommand::OpenSession(SessionOpenParams {
             session_id: key,
             profile_id: None,
-            cwd: None,
+            cwd: self.workspace_cwd.clone(),
             after: None,
         }));
         session_id
@@ -390,21 +409,11 @@ impl Agent for OctosUiAgent {
         &mut self,
         _cx: &mut Cx,
         _session_id: SessionId,
-        tool_use_id: &str,
-        result: &str,
-        is_error: bool,
+        _tool_use_id: &str,
+        _result: &str,
+        _is_error: bool,
     ) {
-        // Best-effort placeholder — `tool/result` is not a stable wire method
-        // yet (octos-app-transport flags this on `OutboundCommand::SendToolResult`).
-        // W04+W05 will refine the shape once the server contract lands.
-        let payload = serde_json::json!({
-            "content": result,
-            "is_error": is_error,
-        });
-        self.post(OutboundCommand::SendToolResult {
-            tool_call_id: tool_use_id.to_owned(),
-            result: payload,
-        });
+        log::warn!("octos-ui-agent: ignoring tool result; AppUI has no contract command for it");
     }
 
     fn cancel_prompt(&mut self, _cx: &mut Cx, prompt_id: PromptId) {
@@ -448,6 +457,56 @@ impl Agent for OctosUiAgent {
     }
 }
 
+/// Handle exposed by `OctosUiAgent::task_output_handle` for one-shot
+/// `task/output/read` RPCs from the coding task drill-down.
+#[derive(Clone)]
+pub struct TaskOutputHandle {
+    cmd_tx: Sender<OutboundCommand>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl TaskOutputHandle {
+    pub fn read(&self, params: TaskOutputReadParams) {
+        use tokio::sync::oneshot;
+
+        let task_id = params.task_id.clone();
+        let session_id = params.session_id.clone();
+        let (tx, rx) = oneshot::channel();
+        let cmd = OutboundCommand::RequestTaskOutput { params, reply: tx };
+        match self.cmd_tx.try_send(cmd) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+            | Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                Cx::post_action(crate::app::coding::TaskOutputAction {
+                    task_id,
+                    session_id,
+                    outcome: crate::app::coding::TaskOutputOutcome::Failed(
+                        "transport unavailable".to_owned(),
+                    ),
+                });
+                return;
+            }
+        }
+        self.runtime.spawn(async move {
+            let outcome = match rx.await {
+                Ok(Ok(result)) => crate::app::coding::TaskOutputOutcome::Loaded(result),
+                Ok(Err(err)) => crate::app::coding::TaskOutputOutcome::Failed(format!(
+                    "{} ({})",
+                    err.message, err.code
+                )),
+                Err(_) => crate::app::coding::TaskOutputOutcome::Failed(
+                    "transport dropped the reply channel".to_owned(),
+                ),
+            };
+            Cx::post_action(crate::app::coding::TaskOutputAction {
+                task_id,
+                session_id,
+                outcome,
+            });
+        });
+    }
+}
+
 /// W05 — handle exposed by `OctosUiAgent::approval_handle`. Carries a
 /// cheap clone of the transport sender plus a runtime handle so the
 /// approvals widget can post `approval/respond` and forward the wire
@@ -467,11 +526,10 @@ impl ApprovalHandle {
     pub fn respond(
         &self,
         session_id: SessionKey,
-        approval_id: octos_core::ui_protocol::ApprovalId,
-        decision: octos_core::ui_protocol::ApprovalDecision,
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
         scope: Option<String>,
     ) {
-        use octos_core::ui_protocol::ApprovalRespondParams;
         use tokio::sync::oneshot;
         // `ApprovalDecision` is no longer `Copy` (FIX-01); clone it once for
         // the wire params and keep the original for the failure branch +

@@ -13,8 +13,9 @@ use crate::tasks::{Task, ToolCall, ToolCallId};
 use crate::toasts::{Toast, ToastKind, ToastQueue};
 use crate::turns::Turn;
 use chrono::Utc;
-// see octos-core ui_protocol.rs:62 (UiCursor), :69 (TurnId), :1577 (UiNotification)
-use octos_core::ui_protocol::{TaskRuntimeState, TurnId, UiCursor, UiNotification};
+use octos_core::app_ui::AppUiBackendEvent as UiNotification;
+// see octos-core ui_protocol.rs:62 (UiCursor), :69 (TurnId)
+use octos_core::ui_protocol::{TaskRuntimeState, TurnId, UiCursor};
 use octos_core::{SessionKey, TaskId};
 use std::collections::HashMap;
 
@@ -110,6 +111,20 @@ pub fn reduce(state: &mut AppState, event: Event) {
     }
 }
 
+fn task_runtime_state_wire(state: TaskRuntimeState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| format!("{state:?}").to_lowercase())
+}
+
+fn task_runtime_state_is_terminal(state: TaskRuntimeState) -> bool {
+    matches!(
+        task_runtime_state_wire(state).as_str(),
+        "completed" | "failed" | "cancelled"
+    )
+}
+
 fn apply_snapshot(state: &mut AppState, ev: SnapshotEvent) {
     match ev {
         SnapshotEvent::SessionsHydrated(list) => for s in list { state.sessions.insert(s); },
@@ -142,15 +157,16 @@ fn route_session(n: &UiNotification) -> Option<&SessionKey> {
         UiNotification::ToolCompleted(e) => Some(&e.session_id),
         UiNotification::ApprovalRequested(e) => Some(&e.session_id),
         UiNotification::ApprovalAutoResolved(e) => Some(&e.session_id),
-        UiNotification::ApprovalDecided(e) => Some(&e.session_id),
-        UiNotification::ApprovalCancelled(e) => Some(&e.session_id),
         UiNotification::TaskUpdated(e) => Some(&e.session_id),
         UiNotification::TaskOutputDelta(e) => Some(&e.session_id),
         UiNotification::ProgressUpdated(e) => Some(&e.session_id),
-        UiNotification::ReplayLossy(e) => Some(&e.session_id),
         UiNotification::Warning(e) => Some(&e.session_id),
         UiNotification::TurnCompleted(e) => Some(&e.session_id),
         UiNotification::TurnError(e) => Some(&e.session_id),
+        // forward-compat per spec § 4.1 — unknown future variants don't
+        // contribute a routable session_id; the cursor will simply not
+        // advance for them, which is the safe default.
+        _ => None,
     }
 }
 
@@ -222,11 +238,11 @@ fn apply_protocol(state: &mut AppState, cursor: Option<UiCursor>, n: UiNotificat
             });
             // Lower-cased typed state for the dock; unknown future variants
             // pass through via Debug.
-            task.runtime_state = format!("{:?}", e.state).to_lowercase();
+            task.runtime_state = task_runtime_state_wire(e.state);
             task.summary = Some(e.title.clone());
             if let Some(detail) = e.runtime_detail { task.lifecycle_state = detail; }
             task.last_updated = now;
-            let active = !matches!(e.state, TaskRuntimeState::Completed | TaskRuntimeState::Failed);
+            let active = !task_runtime_state_is_terminal(e.state);
             if active {
                 mark_active_task(state, &e.session_id, true);
             } else {
@@ -325,39 +341,28 @@ fn apply_protocol(state: &mut AppState, cursor: Option<UiCursor>, n: UiNotificat
             ));
         }
         UiNotification::ApprovalDecided(e) => {
-            let known = state.approvals.by_id.contains_key(&e.approval_id);
-            state.approvals.decided(&e.approval_id, e.decision.clone());
-            if known {
-                state.toasts.push(Toast::new(
-                    ToastKind::Info,
-                    format!(
-                        "Approval decided by {}: {}",
-                        e.decided_by,
-                        e.decision.as_wire_str()
-                    ),
-                ));
-            }
+            state
+                .approvals
+                .decided(&e.approval_id, e.decision);
         }
         UiNotification::ApprovalCancelled(e) => {
-            let known = state.approvals.by_id.contains_key(&e.approval_id);
-            state.approvals.cancelled(&e.approval_id, e.reason.clone());
-            if known {
-                state.toasts.push(Toast::new(
-                    ToastKind::Info,
-                    format!("Approval cancelled: {}", e.reason),
-                ));
-            }
+            state
+                .approvals
+                .cancelled(&e.approval_id, e.reason.clone());
+            state.toasts.push(Toast::new(
+                ToastKind::Info,
+                format!("Approval cancelled: {}", e.reason),
+            ));
         }
         UiNotification::ReplayLossy(e) => {
-            if let Some(cursor) = e.last_durable_cursor {
-                state.cursor.insert(e.session_id.clone(), cursor);
-            }
+            let cursor_hint = e
+                .last_durable_cursor
+                .as_ref()
+                .map(|cursor| format!("; last durable seq {}", cursor.seq))
+                .unwrap_or_default();
             state.toasts.push(Toast::new(
                 ToastKind::Reconnecting,
-                format!(
-                    "Replay dropped {} notifications; rehydrating session",
-                    e.dropped_count
-                ),
+                format!("Replay lossy: {} dropped{cursor_hint}", e.dropped_count),
             ));
         }
     }
@@ -376,7 +381,7 @@ fn recompute_active(state: &mut AppState, sid: &SessionKey) {
     let open_tool = state.tool_calls.values()
         .any(|tc| &tc.session_id == sid && tc.completed_at.is_none());
     let open_task = state.tasks.values().any(|t| &t.session_id == sid
-        && !matches!(t.runtime_state.as_str(), "completed" | "failed"));
+        && !matches!(t.runtime_state.as_str(), "completed" | "failed" | "cancelled"));
     mark_active_task(state, sid, open_tool || open_task);
 }
 
@@ -393,8 +398,9 @@ mod tests {
     use chrono::DateTime;
     use octos_core::ui_protocol::{
         ApprovalCancelledEvent, ApprovalDecidedEvent, ApprovalDecision, ApprovalId,
-        MessageDeltaEvent, ReplayLossyEvent, TaskRuntimeState, TaskUpdatedEvent,
-        ToolCompletedEvent, ToolStartedEvent, TurnCompletedEvent, TurnStartedEvent,
+        ApprovalRequestedEvent, MessageDeltaEvent, ReplayLossyEvent, TaskRuntimeState,
+        TaskUpdatedEvent, ToolCompletedEvent, ToolStartedEvent, TurnCompletedEvent,
+        TurnStartedEvent,
     };
     use uuid::Uuid;
 
@@ -509,6 +515,35 @@ mod tests {
     }
 
     #[test]
+    fn task_updated_cancelled_is_terminal() {
+        let mut s = AppState::new();
+        seed_session(&mut s, "t:1");
+        let tid = TaskId::default();
+        let cancelled = serde_json::from_value::<TaskRuntimeState>(serde_json::json!("cancelled"));
+        let Ok(cancelled) = cancelled else {
+            // Older local octos-core checkouts do not expose UPCR-2026-004 yet.
+            return;
+        };
+        for st in [TaskRuntimeState::Running, cancelled] {
+            reduce(&mut s, Event::Protocol {
+                cursor: None,
+                notification: UiNotification::TaskUpdated(TaskUpdatedEvent {
+                    session_id: key("t:1"),
+                    task_id: tid.clone(),
+                    title: "build".into(),
+                    state: st,
+                    runtime_detail: None,
+                }),
+            });
+        }
+        assert_eq!(
+            s.tasks.get(&tid).unwrap().runtime_state.as_str(),
+            "cancelled"
+        );
+        assert!(!s.sessions.get(&key("t:1")).unwrap().has_active_task);
+    }
+
+    #[test]
     fn approval_requested_lands_in_slice() {
         let mut s = AppState::new();
         seed_session(&mut s, "t:1");
@@ -516,9 +551,7 @@ mod tests {
         reduce(&mut s, Event::Protocol {
             cursor: None,
             notification: UiNotification::ApprovalRequested(
-                octos_core::ui_protocol::ApprovalRequestedEvent::generic(
-                    key("t:1"), aid.clone(), turn(1), "shell", "Run", "ls",
-                ),
+                ApprovalRequestedEvent::generic(key("t:1"), aid.clone(), turn(1), "shell", "Run", "ls"),
             ),
         });
         assert_eq!(s.approvals.pending_count(), 1);
@@ -528,83 +561,75 @@ mod tests {
     }
 
     #[test]
-    fn approval_decided_notification_collapses_pending_card() {
+    fn approval_decided_and_cancelled_notifications_update_slice() {
         let mut s = AppState::new();
         seed_session(&mut s, "t:1");
-        let aid = ApprovalId(Uuid::from_u128(7));
-        reduce(&mut s, Event::Protocol {
-            cursor: None,
-            notification: UiNotification::ApprovalRequested(
-                octos_core::ui_protocol::ApprovalRequestedEvent::generic(
-                    key("t:1"), aid.clone(), turn(1), "shell", "Run", "ls",
-                ),
-            ),
-        });
-
+        let decided_id = ApprovalId(Uuid::from_u128(7));
+        let cancelled_id = ApprovalId(Uuid::from_u128(8));
+        for aid in [&decided_id, &cancelled_id] {
+            reduce(&mut s, Event::Protocol {
+                cursor: None,
+                notification: UiNotification::ApprovalRequested(ApprovalRequestedEvent::generic(
+                    key("t:1"),
+                    aid.clone(),
+                    turn(1),
+                    "shell",
+                    "Run",
+                    "ls",
+                )),
+            });
+        }
         reduce(&mut s, Event::Protocol {
             cursor: None,
             notification: UiNotification::ApprovalDecided(ApprovalDecidedEvent::manual(
                 key("t:1"),
-                aid.clone(),
+                decided_id.clone(),
                 turn(1),
                 ApprovalDecision::Approve,
-                "server",
+                "user",
             )),
         });
-
+        reduce(&mut s, Event::Protocol {
+            cursor: None,
+            notification: UiNotification::ApprovalCancelled(ApprovalCancelledEvent::turn_interrupted(
+                key("t:1"),
+                cancelled_id.clone(),
+                turn(1),
+            )),
+        });
         assert_eq!(s.approvals.pending_count(), 0);
-        assert!(s.toasts.iter().any(|t| {
-            t.kind == ToastKind::Info && t.message == "Approval decided by server: approve"
-        }));
+        assert!(matches!(
+            s.approvals.state_for(&decided_id),
+            Some(crate::approvals::ApprovalState::Decided {
+                decision: ApprovalDecision::Approve
+            })
+        ));
+        assert!(matches!(
+            s.approvals.state_for(&cancelled_id),
+            Some(crate::approvals::ApprovalState::Failed(msg))
+                if msg == "cancelled: turn_interrupted"
+        ));
     }
 
     #[test]
-    fn approval_cancelled_notification_collapses_pending_card() {
+    fn replay_lossy_surfaces_rehydrate_toast() {
         let mut s = AppState::new();
         seed_session(&mut s, "t:1");
-        let aid = ApprovalId(Uuid::from_u128(7));
-        reduce(&mut s, Event::Protocol {
-            cursor: None,
-            notification: UiNotification::ApprovalRequested(
-                octos_core::ui_protocol::ApprovalRequestedEvent::generic(
-                    key("t:1"), aid.clone(), turn(1), "shell", "Run", "ls",
-                ),
-            ),
-        });
-
-        reduce(&mut s, Event::Protocol {
-            cursor: None,
-            notification: UiNotification::ApprovalCancelled(
-                ApprovalCancelledEvent::turn_interrupted(key("t:1"), aid.clone(), turn(1)),
-            ),
-        });
-
-        assert_eq!(s.approvals.pending_count(), 0);
-        assert!(s.toasts.iter().any(|t| {
-            t.kind == ToastKind::Info && t.message == "Approval cancelled: turn_interrupted"
-        }));
-    }
-
-    #[test]
-    fn replay_lossy_notification_records_last_durable_cursor() {
-        let mut s = AppState::new();
-        seed_session(&mut s, "t:1");
-        let cursor = UiCursor { stream: "main".into(), seq: 44 };
-
         reduce(&mut s, Event::Protocol {
             cursor: None,
             notification: UiNotification::ReplayLossy(ReplayLossyEvent {
                 session_id: key("t:1"),
                 dropped_count: 2,
-                last_durable_cursor: Some(cursor.clone()),
+                last_durable_cursor: Some(UiCursor {
+                    stream: "main".into(),
+                    seq: 9,
+                }),
             }),
         });
-
-        assert_eq!(s.cursor.get(&key("t:1")), Some(&cursor));
-        assert!(s.toasts.iter().any(|t| {
-            t.kind == ToastKind::Reconnecting
-                && t.message == "Replay dropped 2 notifications; rehydrating session"
-        }));
+        let toast = s.toasts.iter().next().expect("toast");
+        assert_eq!(toast.kind, ToastKind::Reconnecting);
+        assert!(toast.message.contains("Replay lossy: 2 dropped"));
+        assert!(toast.message.contains("last durable seq 9"));
     }
 
     #[test]

@@ -51,6 +51,7 @@ async fn tool_started_arrives_as_durable_notification() {
         profile_id: ProfileId::new("p1"),
         cursor: None,
         requested_capabilities: Capabilities::requested(),
+        workspace_cwd: Some("/tmp".to_owned()),
     };
     let (_cmd_tx, mut events) = ws::spawn(cfg);
 
