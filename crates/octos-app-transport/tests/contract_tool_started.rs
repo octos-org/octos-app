@@ -23,6 +23,7 @@ async fn tool_started_arrives_as_durable_notification() {
     let session_id = SessionKey::new("cli", "demo");
     let notif = UiNotification::ToolStarted(ToolStartedEvent {
         session_id,
+        topic: None,
         turn_id: TurnId::new(),
         tool_call_id: "tc-1".into(),
         tool_name: "shell".into(),

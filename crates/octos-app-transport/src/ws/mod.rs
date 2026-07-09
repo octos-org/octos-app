@@ -62,6 +62,8 @@ enum PendingReply {
     Approval(oneshot::Sender<Result<ApprovalRespondResult, RpcError>>),
     DiffPreview(oneshot::Sender<Result<DiffPreviewGetResult, RpcError>>),
     TaskOutput(oneshot::Sender<Result<TaskOutputReadResult, RpcError>>),
+    /// `session/list` — result re-emitted as `TransportEvent::SessionsListed`.
+    SessionList,
 }
 
 struct SharedState {
@@ -167,9 +169,11 @@ async fn run_state_machine(
     let mut attempt: u32 = 0;
     let mut total_wait = Duration::ZERO;
 
+    log::info!("ws: state machine up (base_url={})", cfg.base_url);
     try_emit(&events, TransportEvent::ConnectionState(ConnectionState::Idle));
 
     loop {
+        log::info!("ws: dialing");
         try_emit(&events, TransportEvent::ConnectionState(ConnectionState::Dialing));
         let req = match build_request(
             &cfg.base_url,
@@ -196,6 +200,7 @@ async fn run_state_machine(
         };
         attempt = 0;
         total_wait = Duration::ZERO;
+        log::info!("ws: connected; handshaking");
         try_emit(&events, TransportEvent::ConnectionState(ConnectionState::Handshaking));
         match run_live(socket, &mut shared, &mut commands, &events).await {
             LiveExit::Disconnect => break,
@@ -319,6 +324,11 @@ where
         OutboundCommand::RequestTaskOutput { params, reply } => {
             (methods::TASK_OUTPUT_READ, to_value(&params), Some(PendingReply::TaskOutput(reply)))
         }
+        OutboundCommand::ListSessions => (
+            methods::SESSION_LIST,
+            to_value(&octos_core::ui_protocol::SessionListParams {}),
+            Some(PendingReply::SessionList),
+        ),
         OutboundCommand::Disconnect => return CommandOutcome::Disconnect,
     };
 
@@ -454,6 +464,15 @@ fn handle_response(
             );
             None
         }
+        PendingReply::SessionList => {
+            match serde_json::from_value::<octos_core::ui_protocol::SessionListResult>(
+                result_value,
+            ) {
+                Ok(r) => try_emit(events, TransportEvent::SessionsListed { sessions: r.sessions }),
+                Err(e) => log::warn!("ws: decode session/list result: {e}"),
+            }
+            None
+        }
     }
 }
 
@@ -469,6 +488,9 @@ fn fail_pending(pending: PendingRequest, err: RpcError) {
         PendingReply::TaskOutput(reply) => {
             let _ = reply.send(Err(err));
         }
+        // Sidebar hydrate is best-effort; the retry rides the next
+        // `session/open` → `CapabilityNegotiated` → `ListSessions` cycle.
+        PendingReply::SessionList => {}
     }
 }
 
@@ -580,7 +602,7 @@ mod tests {
             req.headers()
                 .get("x-octos-ui-features")
                 .and_then(|v| v.to_str().ok()),
-            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1")
+            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, context.lifecycle.v1")
         );
     }
 

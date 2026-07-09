@@ -90,6 +90,25 @@ fn short_id(id: &SessionKey) -> String {
     }
 }
 
+/// Project the raw `session/list` JSON rows (M12 D-5 — the WS replacement
+/// for the retired `GET /api/sessions`) and post the same
+/// `SessionListAction::Hydrated` the REST path used. No network here — just
+/// serde + projection, safe to call from the agent's event drain.
+pub fn hydrate_from_ws_value(sessions: serde_json::Value, fallback_profile: &StoreProfileId) {
+    match serde_json::from_value::<Vec<SessionListItem>>(sessions) {
+        Ok(items) => {
+            let sessions: Vec<Session> = items
+                .into_iter()
+                .map(|i| project_item(i, fallback_profile))
+                .collect();
+            Cx::post_action(SessionListAction::Hydrated(sessions));
+        }
+        Err(e) => {
+            Cx::post_action(SessionListAction::Failed(format!("session/list decode: {e}")));
+        }
+    }
+}
+
 /// Spawn a thread that runs a small tokio runtime, calls
 /// `RestClient::list_sessions`, and posts a `SessionListAction` back to the
 /// UI thread. Off-thread by design — the REST call may take the full 500 ms

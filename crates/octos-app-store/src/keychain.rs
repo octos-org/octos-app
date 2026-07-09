@@ -53,10 +53,43 @@ fn service_name(host: &ServerHost, profile_id: &ProfileId) -> String {
     format!("{SERVICE_PREFIX}::{host}::{profile_id}")
 }
 
+#[cfg(not(target_os = "android"))]
 fn entry(host: &ServerHost, profile_id: &ProfileId) -> Result<keyring::Entry, KeychainError> {
     // `user` is informational on macOS (per-login Keychain); we pass the
     // profile id again so multi-account future setups don't collide.
     Ok(keyring::Entry::new(&service_name(host, profile_id), profile_id.as_str())?)
+}
+
+// ---------------------------------------------------------------------------
+// Android fallback: `keyring` has no Android backend (every call errors at
+// runtime), so the bearer lives in a file under `$HOME/.config/octos-app/`.
+// HOME points at the app-private files dir (`getFilesDir()`, set at startup
+// in `main.rs::handle_startup`), which Android isolates per-app.
+// ---------------------------------------------------------------------------
+#[cfg(target_os = "android")]
+fn token_file(
+    host: &ServerHost,
+    profile_id: &ProfileId,
+) -> Result<std::path::PathBuf, KeychainError> {
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        KeychainError::Backend("HOME unset (android startup bootstrap missing)".into())
+    })?;
+    let mut p = std::path::PathBuf::from(home);
+    p.push(".config");
+    p.push("octos-app");
+    std::fs::create_dir_all(&p).map_err(|e| KeychainError::Backend(e.to_string()))?;
+    let safe: String = service_name(host, profile_id)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    p.push(format!("{safe}.token"));
+    Ok(p)
 }
 
 /// Persist a bearer for `(host, profile_id)`. Overwrites any existing entry.
@@ -65,8 +98,23 @@ pub fn store_token(
     profile_id: &ProfileId,
     token: &SecretToken,
 ) -> Result<(), KeychainError> {
-    entry(host, profile_id)?.set_password(token.expose())?;
-    Ok(())
+    #[cfg(not(target_os = "android"))]
+    {
+        entry(host, profile_id)?.set_password(token.expose())?;
+        Ok(())
+    }
+    #[cfg(target_os = "android")]
+    {
+        let path = token_file(host, profile_id)?;
+        let res =
+            std::fs::write(&path, token.expose()).map_err(|e| KeychainError::Backend(e.to_string()));
+        log::info!(
+            "keychain(android): store {} → {}",
+            path.display(),
+            if res.is_ok() { "ok" } else { "FAILED" }
+        );
+        res
+    }
 }
 
 /// Read a bearer for `(host, profile_id)`. Returns `Ok(None)` for "no entry"
@@ -82,19 +130,53 @@ pub fn load_token(
             return Ok(Some(SecretToken::from(t)));
         }
     }
-    match entry(host, profile_id)?.get_password() {
-        Ok(s) => Ok(Some(SecretToken::from(s))),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.into()),
+    #[cfg(not(target_os = "android"))]
+    {
+        match entry(host, profile_id)?.get_password() {
+            Ok(s) => Ok(Some(SecretToken::from(s))),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(target_os = "android")]
+    {
+        let path = token_file(host, profile_id)?;
+        let out = match std::fs::read_to_string(&path) {
+            Ok(s) if !s.is_empty() => Ok(Some(SecretToken::from(s))),
+            Ok(_) => Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(KeychainError::Backend(e.to_string())),
+        };
+        log::info!(
+            "keychain(android): load {} → {}",
+            path.display(),
+            match &out {
+                Ok(Some(_)) => "found",
+                Ok(None) => "none",
+                Err(_) => "error",
+            }
+        );
+        out
     }
 }
 
 /// Remove the stored bearer. A missing entry is not an error — `Logout` is
 /// idempotent.
 pub fn delete_token(host: &ServerHost, profile_id: &ProfileId) -> Result<(), KeychainError> {
-    match entry(host, profile_id)?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e.into()),
+    #[cfg(not(target_os = "android"))]
+    {
+        match entry(host, profile_id)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+    #[cfg(target_os = "android")]
+    {
+        match std::fs::remove_file(token_file(host, profile_id)?) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(KeychainError::Backend(e.to_string())),
+        }
     }
 }
 

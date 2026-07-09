@@ -31,6 +31,102 @@ use crate::backend::OctosUiAgent;
 /// into the client. See `05-AICHAT-REUSE-MAP.md` "Stuff we drop or replace".
 const OCTOS_PLACEHOLDER_SYSTEM_PROMPT: &str = "";
 
+/// The Makepad Splash scripting manual, baked into the client. When "Splash"
+/// mode is on, this is prepended to the user's message so the LLM emits a
+/// ```runsplash fenced block that the Markdown widget renders as live,
+/// clickable UI (see `app_splash_prompt`). Mirrors aichat's
+/// `app_generation_session_system_prompt`, but delivered per-message because
+/// octos serves system prompts server-side and the protocol carries no
+/// client system-prompt field.
+const SPLASH_MANUAL: &str = include_str!("../../splash.md");
+
+/// Build the message actually sent to the LLM in Splash mode: instructions +
+/// the Splash manual + the user's request. The chat bubble still shows only
+/// the user's original `request` text.
+fn app_splash_prompt(request: &str) -> String {
+    format!(
+        "You are a UI-generation agent. Respond with EXACTLY ONE ```runsplash \
+fenced code block containing Makepad Splash syntax — no prose before, \
+between, or after it, and no other fenced blocks.\n\n\
+Hard rules:\n\
+- `use mod.prelude.widgets.*` is auto-prepended; do NOT write imports.\n\
+- Do NOT wrap output in Root{{}} or Window{{}}; it is inserted into an \
+existing container.\n\
+- Make buttons interactive by notifying the host:\n\
+    Button{{ text: \"+1\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
+- Show live values with placeholders inside string literals:\n\
+    Label{{ text: \"Count: {{{{state.count}}}}\" }}\n\
+- Keep it self-contained and visually clean (padding, spacing, rounded \
+containers, readable labels).\n\
+- CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
+block MUST BEGIN DIRECTLY with a single root container widget — e.g. \
+`RoundedView{{` or `View{{`. Do NOT start with, or use, any top-level `let \
+X = …` component definitions. Inline/repeat any shared structure directly, \
+even if it makes the output longer. A leading `let` will fail to render.\n\n\
+Follow this Splash manual EXACTLY (except the `let`-override above):\n\n{manual}\n\n\
+User request: {request}",
+        manual = SPLASH_MANUAL,
+        request = request,
+    )
+}
+
+/// Substitute `{{state.<path>}}` placeholders in a generated A2App/Splash
+/// block with live values before rendering. `count` fills `{{state.count}}`;
+/// any other path renders as `0` so nothing shows raw `{{…}}`. No-op for
+/// normal messages (they contain no such tokens).
+fn resolve_a2app_placeholders(text: &str, count: i64) -> String {
+    if !text.contains("{{state.") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(pos) = rest.find("{{state.") {
+        out.push_str(&rest[..pos]);
+        let after = &rest[pos + "{{state.".len()..];
+        if let Some(end) = after.find("}}") {
+            // Single shared counter — substitute it for WHATEVER state key the
+            // LLM chose (count, score, value, total, …). MVP tracks one number,
+            // so every `{{state.*}}` shows it rather than guessing the name.
+            let _key = &after[..end];
+            out.push_str(&count.to_string());
+            rest = &after[end + 2..];
+        } else {
+            out.push_str(&rest[pos..]);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Pull the body of the first ```runsplash fenced block out of a message so
+/// it can be fed straight to a `Splash` widget. Returns the raw Splash script
+/// (still containing any `{{state.*}}` placeholders).
+fn extract_runsplash_body(text: &str) -> Option<&str> {
+    let start = text.find("```runsplash")?;
+    let after = &text[start + "```runsplash".len()..];
+    let body_start = after.find('\n')? + 1;
+    let body = &after[body_start..];
+    let end = body.find("```")?;
+    Some(body[..end].trim_end())
+}
+
+/// Short A2App directive for follow-up requests in a session that already has
+/// the Splash manual in its history (see `App::splash_primed`). Avoids
+/// re-sending the ~85KB manual every turn.
+fn app_splash_followup(request: &str) -> String {
+    format!(
+        "Respond with EXACTLY ONE ```runsplash fenced block (Makepad Splash \
+syntax, no prose, no other fences), following the Splash manual already \
+provided earlier in this conversation. Same rules: no imports, no \
+Root/Window wrapper, buttons use `agent.notify(\"<action>\", {{}})`, live \
+values via `{{{{state.<key>}}}}` placeholders. CRITICAL: begin DIRECTLY with \
+a single root container widget (e.g. `RoundedView{{`) — NO top-level `let X = \
+…` component definitions (inline/repeat instead); a leading `let` fails to \
+render.\n\nUser request: {request}",
+    )
+}
+
 app_main!(App);
 
 script_mod! {
@@ -199,12 +295,12 @@ script_mod! {
     }
 
     let SendButton = ButtonFlat {
-        width: 44
-        height: 44
+        width: 36
+        height: 36
         padding: 0
         draw_text +: {
             color: ai_ink
-            text_style +: { font_size: 26 }
+            text_style +: { font_size: 20 }
         }
         draw_bg +: {
             hover: instance(0.0)
@@ -364,17 +460,24 @@ script_mod! {
             width: Fill
             height: Fill
             flow: Down
-            drag_scrolling: false
+            // Touch: finger-drag scrolls the thread. List-level `selectable`
+            // is off because it wins over drag on touch (a drag on text
+            // enters selection and never scrolls — the reported bug); the
+            // per-answer copy icon covers text extraction on mobile.
+            drag_scrolling: true
             auto_tail: true
             smooth_tail: true
-            selectable: true
+            selectable: false
+            // Hide the right-edge scrollbar (drag-to-scroll is the gesture).
+            scroll_bar: mod.widgets.ScrollBar { bar_size: 0.0 }
 
             User := RoundedView {
                 width: Fill
                 height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 50 right: 8}
+                // Full page width (was left:50 chat-bubble indent).
+                margin: Inset{top: 4 bottom: 4 left: 8 right: 8}
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
-                flow: Overlay
+                flow: Down
                 show_bg: true
                 draw_bg +: {
                     color: #x0B2A22E6
@@ -384,7 +487,10 @@ script_mod! {
                 selectable := Markdown {
                     width: Fill
                     height: Fit
-                    selectable: true
+                    // Off on mobile: per-widget text selection fought the
+                    // list's drag-to-scroll (a swipe popped Android's
+                    // Copy/Cut toolbar mid-scroll). Copy icon covers this.
+                    selectable: false
                     use_code_block_widget: true
                     use_math_widget: true
                     body: ""
@@ -456,37 +562,32 @@ script_mod! {
                         }
                     }
                     inline_math := MathView {
-                        font_size: 13.0
+                        // MathView lays out at font_size*1.75; body is ~10,
+                        // so 5.7 keeps inline math the same height as text.
+                        font_size: 5.7
                     }
                     display_math := MathView {
-                        font_size: 15.0
+                        font_size: 6.3
                     }
                 }
 
+                // (Per-message close button removed — user directive.)
                 View {
                     width: Fill
                     height: Fit
                     align: Align{x: 1.0}
-                    delete_button := ButtonFlat {
-                        width: Fit
-                        height: Fit
-                        padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
-                        margin: Inset{top: 2 right: 2}
-                        text: "x"
-                        draw_text +: {
-                            color: #888
-                            text_style +: { font_size: 9 }
-                        }
-                    }
                 }
             }
 
             Assistant := RoundedView {
                 width: Fill
                 height: Fit
-                margin: Inset{top: 4 bottom: 4 left: 8 right: 50}
+                // Full page width (was right:50 indent). flow: Down so the
+                // copy icon lands BELOW the answer text instead of stacking
+                // over it at top-left (the Overlay bug).
+                margin: Inset{top: 4 bottom: 4 left: 8 right: 8}
                 padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
-                flow: Overlay
+                flow: Down
                 show_bg: true
                 draw_bg +: {
                     color: #x0B2A22E6
@@ -501,7 +602,9 @@ script_mod! {
                     selectable := Markdown {
                         width: Fill
                         height: Fit
-                        selectable: true
+                        // Off on mobile — see User bubble note (drag scrolls,
+                        // copy icon extracts).
+                        selectable: false
                         use_code_block_widget: true
                         use_math_widget: true
                         body: ""
@@ -590,38 +693,56 @@ script_mod! {
                             }
                         }
                         inline_math := MathView {
-                            font_size: 13.0
+                            // Match body text height (font_size*1.75 ≈ body).
+                            font_size: 5.7
                         }
                         display_math := MathView {
-                            font_size: 15.0
+                            font_size: 6.3
                         }
                     }
                 }
 
-                View {
+                // Answer action row: copy + share, drawn natively from the
+                // supplied SVGs via each button's DrawSvg icon slot.
+                // `draw_icon.color` overrides the SVG `currentColor`. Both are
+                // gated off until the answer completes (draw loop hides them
+                // on the in-flight item). Flat transparent button bg.
+                actions_row := View {
                     width: Fill
                     height: Fit
-                    align: Align{x: 1.0}
-                    copy_button := ButtonFlat {
-                        width: Fit
-                        height: Fit
-                        padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
-                        margin: Inset{top: 2 right: 2}
-                        text: "copy"
-                        draw_text +: {
-                            color: #888
-                            text_style +: { font_size: 9 }
+                    flow: Right
+                    align: Align{x: 0.0 y: 0.5}
+                    spacing: 2
+                    copy_button := ButtonFlatIcon {
+                        width: 34
+                        height: 30
+                        margin: Inset{top: 6 left: 2}
+                        icon_walk: Walk{ width: 19, height: 19 }
+                        draw_icon +: {
+                            color: #xB6C6BE
+                            svg: crate_resource("self:resources/icons/copy.svg")
+                        }
+                        draw_bg +: {
+                            color: #00000000
+                            color_hover: #xEAD8B814
+                            border_size: 0.0
+                            border_radius: 8.0
                         }
                     }
-                    delete_button := ButtonFlat {
-                        width: Fit
-                        height: Fit
-                        padding: Inset{top: 2 bottom: 2 left: 6 right: 6}
-                        margin: Inset{top: 2 right: 2}
-                        text: "x"
-                        draw_text +: {
-                            color: #888
-                            text_style +: { font_size: 9 }
+                    share_button := ButtonFlatIcon {
+                        width: 34
+                        height: 30
+                        margin: Inset{top: 6}
+                        icon_walk: Walk{ width: 19, height: 19 }
+                        draw_icon +: {
+                            color: #xB6C6BE
+                            svg: crate_resource("self:resources/icons/share.svg")
+                        }
+                        draw_bg +: {
+                            color: #00000000
+                            color_hover: #xEAD8B814
+                            border_size: 0.0
+                            border_radius: 8.0
                         }
                     }
                 }
@@ -1020,15 +1141,8 @@ script_mod! {
         }
     }
 
-    let StudioScreen = #(crate::app::producers::StudioScreenWidget::register_widget(vm)) {
-        ..ProducerBody{}
-    }
-    let SlidesScreen = #(crate::app::producers::SlidesScreenWidget::register_widget(vm)) {
-        ..ProducerBody{}
-    }
-    let SitesScreen = #(crate::app::producers::SitesScreenWidget::register_widget(vm)) {
-        ..ProducerBody{}
-    }
+    // StudioScreen / SlidesScreen / SitesScreen templates removed —
+    // unsupported in this build (their widgets remain in `producers.rs`).
 
     startup() do #(App::script_component(vm)){
         ui: Root{
@@ -1225,84 +1339,10 @@ script_mod! {
                             }
                         }
 
-                        // W06 / M3 — Coding workspace nav button. Mirrors
-                        // `nav_content`. Flips `APP_STATE.navigation` to
-                        // `CurrentScreen::Coding` via App::handle_actions.
-                        nav_coding := ButtonFlat {
-                            width: Fill
-                            height: 30
-                            text: "⌨  Coding"
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 4 right: 4}
-                            draw_text +: {
-                                color: #xE4D4B6
-                                text_style +: { font_size: 12 }
-                            }
-                            draw_bg +: {
-                                color: #00000000
-                                color_hover: #xEAD8B814
-                                border_size: 0.0
-                                border_radius: 8.0
-                            }
-                        }
-
-                        // W07 / M3 — Studio / Slides / Sites producer nav.
-                        // Each routes to its `CurrentScreen::*` variant via
-                        // `App::handle_actions`. The IA matches
-                        // `04-IA-AND-NAVIGATION.md` § "Top-level shell".
-                        nav_studio := ButtonFlat {
-                            width: Fill
-                            height: 30
-                            text: "🎙  Studio"
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 4 right: 4}
-                            draw_text +: {
-                                color: #xE4D4B6
-                                text_style +: { font_size: 12 }
-                            }
-                            draw_bg +: {
-                                color: #00000000
-                                color_hover: #xEAD8B814
-                                border_size: 0.0
-                                border_radius: 8.0
-                            }
-                        }
-
-                        nav_slides := ButtonFlat {
-                            width: Fill
-                            height: 30
-                            text: "🖼  Slides"
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 4 right: 4}
-                            draw_text +: {
-                                color: #xE4D4B6
-                                text_style +: { font_size: 12 }
-                            }
-                            draw_bg +: {
-                                color: #00000000
-                                color_hover: #xEAD8B814
-                                border_size: 0.0
-                                border_radius: 8.0
-                            }
-                        }
-
-                        nav_sites := ButtonFlat {
-                            width: Fill
-                            height: 30
-                            text: "🌐  Sites"
-                            align: Align{x: 0.0 y: 0.5}
-                            padding: Inset{left: 4 right: 4}
-                            draw_text +: {
-                                color: #xE4D4B6
-                                text_style +: { font_size: 12 }
-                            }
-                            draw_bg +: {
-                                color: #00000000
-                                color_hover: #xEAD8B814
-                                border_size: 0.0
-                                border_radius: 8.0
-                            }
-                        }
+                        // Coding / Studio / Slides / Sites navs removed —
+                        // not supported in this build (user directive). The
+                        // screens' widget modules stay registered for when
+                        // the server-side tools land.
 
                         Label {
                             text: "对话"
@@ -1372,7 +1412,10 @@ script_mod! {
                         height: Fill
                         new_batch: true
                         flow: Down
-                        padding: Inset{left: 34 top: 18 right: 34 bottom: 22}
+                        // 34pt side padding (plus app_shell's 16) wasted a
+                        // quarter of a 384pt phone viewport; 14 keeps the
+                        // glass inset visible on desktop too.
+                        padding: Inset{left: 14 top: 18 right: 14 bottom: 22}
                         spacing: 12
                         draw_bg +: {
                             tint_color: #x0B3B31
@@ -1394,6 +1437,26 @@ script_mod! {
                             height: 40
                             flow: Right
                             align: Align{y: 0.5}
+
+                            // Phone: the sidebar auto-collapses after nav
+                            // clicks on narrow windows; this brings it back.
+                            nav_toggle := ButtonFlat {
+                                width: 34
+                                height: 30
+                                text: "☰"
+                                margin: Inset{right: 8}
+                                align: Align{x: 0.5 y: 0.5}
+                                draw_text +: {
+                                    color: #xE4D4B6
+                                    text_style +: { font_size: 14 }
+                                }
+                                draw_bg +: {
+                                    color: #00000000
+                                    color_hover: #xEAD8B814
+                                    border_size: 0.0
+                                    border_radius: 8.0
+                                }
+                            }
 
                             Label {
                                 text: "Octos"
@@ -1417,15 +1480,24 @@ script_mod! {
                                 draw_text.text_style.font_size: 11
                             }
 
+                            // Live context-window usage — updated every turn
+                            // from `context/normalization` (App::update_context_indicator).
+                            // Shows how full the model's context is, so the
+                            // server-side compaction that keeps it bounded is
+                            // visible rather than invisible.
+                            context_chip := Label {
+                                text: ""
+                                margin: Inset{left: 10}
+                                draw_text.color: #x8FB8A6
+                                draw_text.text_style.font_size: 11
+                            }
+
                             View { width: Fill height: 1 }
 
                             ToolbarGlass {
-                                width: 286
-
-                                ToolbarLabel {
-                                    text: "Profile"
-                                    width: 76
-                                }
+                                // Slimmed for phone viewports (was 286 with a
+                                // "Profile" caption — clipped at 384pt).
+                                width: 150
 
                                 // Renamed from `backend_dropdown` per W02 §
                                 // "Top bar contents" — same widget shape, but
@@ -1483,7 +1555,7 @@ script_mod! {
                                 }
                             }
 
-                            ToolbarGlass {
+                            glass_toolbar := ToolbarGlass {
                                 width: 318
                                 margin: Inset{left: 12}
 
@@ -1551,28 +1623,70 @@ script_mod! {
                         // approvals are pending it pins above the composer.
                         approvals_pane := ApprovalsPane {}
 
+                        // Swimming-octopus thinking indicator — visible only
+                        // while a turn is streaming (`is_streaming`).
+                        // Toast strip — one auto-dismissing pill for
+                        // compaction / memory-saved / warning messages
+                        // (App::sync_toasts drives it from APP_STATE.toasts).
+                        toast_row := View {
+                            width: Fill
+                            height: Fit
+                            visible: false
+                            align: Align{x: 0.5}
+                            toast_pill := RoundedView {
+                                width: Fit
+                                height: Fit
+                                margin: Inset{top: 2 bottom: 4}
+                                padding: Inset{left: 14 top: 8 right: 14 bottom: 8}
+                                show_bg: true
+                                draw_bg +: {
+                                    color: #x0C3A2FF2
+                                    radius: 10.0
+                                }
+                                toast_label := Label {
+                                    width: Fit
+                                    height: Fit
+                                    text: ""
+                                    draw_text.color: #xDCEAE0
+                                    draw_text.text_style.font_size: 11
+                                }
+                            }
+                        }
+
+                        octo_row := View {
+                            width: Fill
+                            height: Fit
+                            visible: false
+                            align: Align{x: 0.5}
+                            octo := OctoThinking {}
+                        }
+
                         composer_row := View {
                             width: Fill
                             height: Fit
                             align: Align{x: 0.5 y: 0.0}
 
                             composer := GlassPanel {
-                                width: Fill{min: 620 max: 1040}
+                                // No min-width: a 620pt floor pushed the
+                                // composer (and its Send button) off-screen
+                                // on portrait phones (~384pt viewport).
+                                width: Fill{max: 1040}
                                 height: Fit
                                 new_batch: true
                                 flow: Down
-                                padding: Inset{left: 18 top: 14 right: 14 bottom: 12}
-                                spacing: 10
+                                margin: Inset{left: 10 right: 10}
+                                padding: Inset{left: 14 top: 8 right: 10 bottom: 8}
+                                spacing: 6
                                 draw_bg +: {
                                     tint_color: #x0B4035
                                     tint_alpha: 0.76
                                     border_color: ai_cyan
                                     border_alpha: 0.54
                                     border_width: 1.2
-                                    corner_radius: 24.0
+                                    corner_radius: 12.0
                                     halo_color: ai_cyan
-                                    halo_strength: 0.16
-                                    halo_radius: 7.0
+                                    halo_strength: 0.10
+                                    halo_radius: 4.0
                                     highlight_strength: 0.34
                                     highlight_band_height: 48.0
                                     chroma_strength: 0.0
@@ -1581,8 +1695,13 @@ script_mod! {
 
                                 input := TextInput {
                                     width: Fill
-                                    height: 56
-                                    empty_text: "问任何事。输入 @ 使用插件或提及文件"
+                                    height: 38
+                                    // Soft keyboards: show a Send action key
+                                    // (ImeAction::Send submits via the same
+                                    // path as the ↑ button). Without this the
+                                    // on-screen Enter did nothing visible.
+                                    return_key_type: Send
+                                    empty_text: "问任何事…"
                                     draw_bg +: {
                                         color: #00000000
                                         color_hover: #00000000
@@ -1615,22 +1734,29 @@ script_mod! {
                                     height: Fit
                                     flow: Right
                                     align: Align{y: 0.5}
-                                    spacing: 8
+                                    spacing: 6
 
                                     attach_button := IconButton { text: "+" }
 
-                                    mention_button := IconButton { text: "@" }
-
-                                    tools_button := IconButton { text: "⌘" }
-
-                                    Label {
-                                        text: "默认权限"
-                                        draw_text.color: ai_cream_dim
-                                        draw_text.text_style.font_size: 11
-                                    }
+                                    // @ mention, ⌘ tools and 默认权限 stubs
+                                    // dropped: all are M1 placeholders and
+                                    // the row must fit a 384pt phone
+                                    // viewport.
 
                                     thinking_toggle := ToggleFlat {
                                         text: "Thinking"
+                                        active: false
+                                        draw_text +: {
+                                            color: ai_cream_dim
+                                            text_style +: { font_size: 11 }
+                                        }
+                                    }
+
+                                    // A2App mode: wrap the next message so the
+                                    // LLM returns a live `runsplash` UI block
+                                    // (Makepad Splash → rendered mini-app).
+                                    splash_toggle := ToggleFlat {
+                                        text: "A2App"
                                         active: false
                                         draw_text +: {
                                             color: ai_cream_dim
@@ -1660,7 +1786,7 @@ script_mod! {
 
                                     clear_button := PillButton {
                                         text: "Clear"
-                                        width: 78
+                                        width: 56
                                         height: 36
                                         draw_bg +: {
                                             color: #x08251EC8
@@ -1698,37 +1824,14 @@ script_mod! {
                             visible: false
                         }
 
-                        // W06 / M3 — Coding workspace. Two-pane queue +
-                        // typed-preview screen, sibling to `chat_screen`
-                        // and `content_screen`. App::handle_actions
-                        // toggles `set_visible` for `CurrentScreen::Coding`.
-                        // Hidden by default; sidebar `nav_coding` flips it on.
-                        coding_screen := CodingScreen {
-                            visible: false
-                        }
-
-                        // W07 / M3 — Studio / Slides / Sites producers.
-                        // Three sibling screens, structurally identical
-                        // (triptych: source · chat · output), gated by
-                        // `CurrentScreen::Studio/Slides/Sites`. Hidden by
-                        // default; sidebar `nav_studio/slides/sites` flip
-                        // them on. Each shares the same shell defined in
-                        // `app/src/app/producers.rs::script_mod`.
-                        studio_screen := StudioScreen {
-                            visible: false
-                        }
-                        slides_screen := SlidesScreen {
-                            visible: false
-                        }
-                        sites_screen := SitesScreen {
-                            visible: false
-                        }
+                        // Coding / Studio / Slides / Sites screens removed —
+                        // unsupported in this build (user directive).
 
                         status_label := Label {
                             width: Fill
                             height: Fit
                             text: "Initializing..."
-                            margin: Inset{left: 92 right: 92 top: 0 bottom: 0}
+                            margin: Inset{left: 12 right: 12 top: 0 bottom: 0}
                             draw_text.text_style.font_size: 10
                             draw_text.color: #xE2D2B9AA
                         }
@@ -1776,6 +1879,7 @@ pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatD
     streaming_text: String::new(),
     thinking_text: String::new(),
     is_streaming: false,
+    a2app_count: 0,
 });
 
 // Slider position range (NOT alpha — alpha is derived per-layer).
@@ -2221,6 +2325,10 @@ pub struct ChatData {
     pub streaming_text: String,
     pub thinking_text: String,
     pub is_streaming: bool,
+    /// Live counter for rendered A2App/Splash UIs; substituted into
+    /// `{{state.count}}` at render time. Updated by inc/dec/reset button
+    /// actions in the App action handler.
+    pub a2app_count: i64,
 }
 
 impl ChatData {
@@ -2267,6 +2375,14 @@ impl Widget for ChatList {
                         }
 
                         let (item_widget, _) = list.item_with_existed(cx, item_id, id!(Assistant));
+                        // Copy/share icons only appear once the answer is
+                        // complete — hide them on the in-flight streaming item.
+                        item_widget
+                            .button(cx, ids!(copy_button))
+                            .set_visible(cx, false);
+                        item_widget
+                            .button(cx, ids!(share_button))
+                            .set_visible(cx, false);
                         let streaming_body;
                         let text: &str = if data.streaming_text.is_empty() {
                             if data.thinking_text.is_empty() {
@@ -2294,7 +2410,10 @@ impl Widget for ChatList {
                         // content: some LLMs emit the wrapper as the very
                         // first tokens, so we'd otherwise render a growing
                         // code block for the whole stream.
-                        markdown.set_text(cx, unwrap_outer_markdown_fence(text));
+                        let unwrapped_stream = unwrap_outer_markdown_fence(text);
+                        let resolved_stream =
+                            resolve_a2app_placeholders(unwrapped_stream, data.a2app_count);
+                        markdown.set_text(cx, &resolved_stream);
                         if just_started {
                             markdown.reset_all_streaming_animations();
                         } else {
@@ -2311,11 +2430,22 @@ impl Widget for ChatList {
                             ChatRole::Assistant => id!(Assistant),
                         };
                         let item_widget = list.item(cx, item_id, template);
+                        // Completed message — ensure the copy/share icons are
+                        // shown (PortalList pools items; this one may have been
+                        // the hidden streaming item last frame). User messages
+                        // have neither button, so these are no-ops there.
+                        item_widget
+                            .button(cx, ids!(copy_button))
+                            .set_visible(cx, true);
+                        item_widget
+                            .button(cx, ids!(share_button))
+                            .set_visible(cx, true);
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         // wrap_bare_latex wraps `\cmd{…}` with `$…$` so
                         // MathView can render them.
                         let unwrapped = unwrap_outer_markdown_fence(&msg.text);
                         let rendered = wrap_bare_latex(unwrapped);
+                        let rendered = resolve_a2app_placeholders(&rendered, data.a2app_count);
                         markdown.set_text(cx, &rendered);
                         if is_animating {
                             markdown.stop_streaming_animation();
@@ -2345,6 +2475,14 @@ impl Widget for ChatList {
                             cx.copy_to_clipboard(&msg.text);
                         }
                     }
+                    // Share opens the OS share sheet (Android ACTION_SEND).
+                    let share_btn = item.button(cx, ids!(share_button));
+                    if share_btn.clicked(actions) {
+                        let data = CHAT_DATA.read().unwrap();
+                        if let Some(msg) = data.messages.get(item_id) {
+                            cx.share_text(&msg.text);
+                        }
+                    }
                 }
             }
         }
@@ -2364,6 +2502,21 @@ impl Widget for ChatList {
 pub struct App {
     #[live]
     ui: WidgetRef,
+    /// Auto-dismiss timer for the toast strip (compaction / memory-saved /
+    /// warnings). Empty when no toast is showing.
+    #[rust]
+    toast_timer: Timer,
+    /// "A2App" composer toggle: when on, the next message is wrapped with the
+    /// Splash UI-generation prompt so the LLM returns a `runsplash` block that
+    /// renders as live UI.
+    #[rust]
+    splash_mode: bool,
+    /// Whether the Splash manual has already been sent into the current
+    /// session. octos sessions are stateful server-side, so the ~85KB manual
+    /// is primed once (first A2App message); later A2App messages send only a
+    /// short instruction, avoiding re-sending it every turn. Reset on new chat.
+    #[rust]
+    splash_primed: bool,
     /// Single OctosUiAgent instance — replaces aichat's `Box<dyn Agent>`
     /// dynamic dispatch over LLM backends. Lazily constructed on first use.
     #[rust]
@@ -2435,6 +2588,45 @@ impl App {
         let approval_handle = agent.approval_handle();
         let task_output_handle = agent.task_output_handle();
         (Box::new(agent) as Box<dyn Agent>, approval_handle, task_output_handle)
+    }
+
+    /// (Re)build the REST client + `OctosUiAgent` from the on-disk
+    /// config/token state. Runs at boot and again after a successful login,
+    /// so the WS transport picks up a fresh bearer without an app restart
+    /// (the replaced agent drops its runtime + socket).
+    ///
+    /// W04 — the REST session hydrate fires before the agent steals the
+    /// config. Empty bearer means we expect a 401; the failure path is
+    /// silent in M1. W04 follow-up #5 — `/api/version` probe runs
+    /// off-thread so we don't stall the caller.
+    fn connect_transport(&mut self, cx: &mut Cx) {
+        let transport_config = Self::placeholder_transport_config();
+        log::info!(
+            "connect transport: base_url={} profile_id={}",
+            transport_config.base_url, transport_config.profile_id.0
+        );
+        // M12 D-5 — `GET /api/sessions` is retired server-side; the sidebar
+        // hydrates over the WS (`session/list`) once `session/open` lands
+        // (see `OctosUiAgent`'s `CapabilityNegotiated` arm). Only the public
+        // version probe stays on REST.
+        Self::probe_version(Self::build_rest_client(&transport_config));
+        // Reflect the signed-in identity in the top bar: the Profile pill
+        // previously shipped its "(no profile)" stub forever.
+        let pid_str = transport_config.profile_id.0.clone();
+        if !pid_str.is_empty() {
+            self.available_profiles =
+                vec![(ProfileId::from(pid_str.clone()), pid_str.clone())];
+            self.current_profile = Some(ProfileId::from(pid_str.clone()));
+            let dd = self.ui.drop_down(cx, ids!(backend_dropdown));
+            dd.set_labels(cx, vec![pid_str]);
+            dd.set_selected_item(cx, 0);
+        }
+        self.update_status(cx);
+        let (agent, approval_handle, task_output_handle) =
+            Self::create_octos_agent(transport_config);
+        self.agent = Some(agent);
+        self.approval_handle = Some(approval_handle);
+        self.task_output_handle = Some(task_output_handle);
     }
 
     /// Build a `RestClient` from a `TransportConfig`. Used by W04 to hydrate
@@ -2560,9 +2752,21 @@ impl App {
     }
 
     fn current_workspace_cwd() -> Option<String> {
-        std::env::current_dir()
-            .ok()
-            .map(|path| path.to_string_lossy().into_owned())
+        // Android: the process cwd is `/`, which the server's session
+        // workspace policy rejects ("failed to bootstrap session workspace
+        // policy"). No meaningful workspace exists on-device — omit it and
+        // let the server pick the profile default.
+        #[cfg(target_os = "android")]
+        {
+            None
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+                .filter(|p| p != "/")
+        }
     }
 
     /// Resolve the bearer token for `(host, profile_id)`. `OCTOS_APP_TOKEN`
@@ -2593,8 +2797,11 @@ impl App {
             data.streaming_text.clear();
             data.thinking_text.clear();
             data.is_streaming = false;
+            data.a2app_count = 0;
             data.save_to_disk();
         }
+        // New session — the Splash manual must be re-primed into it.
+        self.splash_primed = false;
 
         if let Some(agent) = &mut self.agent {
             let config = SessionConfig {
@@ -2608,13 +2815,20 @@ impl App {
     }
 
     fn update_empty_state_visibility(&self, cx: &mut Cx) {
-        let show_empty_state = {
+        let (show_empty_state, is_streaming) = {
             let data = CHAT_DATA.read().unwrap();
-            data.messages.is_empty() && !data.is_streaming
+            (
+                data.messages.is_empty() && !data.is_streaming,
+                data.is_streaming,
+            )
         };
         self.ui
             .view(cx, ids!(empty_state))
             .set_visible(cx, show_empty_state);
+        // Swimming octopus = "the model is working on it".
+        self.ui
+            .view(cx, ids!(octo_row))
+            .set_visible(cx, is_streaming);
     }
 
     fn send_message(&mut self, cx: &mut Cx) {
@@ -2648,7 +2862,22 @@ impl App {
         // Octos sessions are stateful server-side, so we don't inject
         // history client-side (aichat's stateless replay is gone — see
         // `05-AICHAT-REUSE-MAP.md` "Stuff we drop or replace").
-        self.current_prompt = Some(agent.send_prompt(cx, session_id, &text));
+        //
+        // Splash mode: the bubble shows the user's original `text`, but the
+        // LLM receives the Splash UI-generation prompt + manual so it returns
+        // a `runsplash` block the Markdown widget renders live.
+        let sent = if self.splash_mode {
+            if self.splash_primed {
+                // Manual already in session history — send a short directive.
+                app_splash_followup(&text)
+            } else {
+                self.splash_primed = true;
+                app_splash_prompt(&text)
+            }
+        } else {
+            text.clone()
+        };
+        self.current_prompt = Some(agent.send_prompt(cx, session_id, &sent));
         self.ui.view(cx, ids!(cancel_button)).set_visible(cx, true);
 
         let chat_list = self.ui.widget(cx, ids!(chat_list));
@@ -2725,6 +2954,92 @@ impl App {
         }
     }
 
+    /// Re-render every assistant message's markdown with the current A2App
+    /// counter substituted into `{{state.count}}`. Mirrors aichat's
+    /// `refresh_visible_state_templates`: set_text directly on each pooled
+    /// PortalList item's markdown (a plain redraw does NOT re-run the item's
+    /// draw), so a live counter updates in place.
+    fn refresh_a2app_templates(&self, cx: &mut Cx) {
+        let (messages, count) = {
+            let data = CHAT_DATA.read().unwrap();
+            let msgs: Vec<(usize, String)> = data
+                .messages
+                .iter()
+                .enumerate()
+                .filter_map(|(i, m)| match m.role {
+                    ChatRole::Assistant => Some((i, m.text.clone())),
+                    _ => None,
+                })
+                .collect();
+            (msgs, data.a2app_count)
+        };
+        let chat_list = self.ui.widget(cx, ids!(chat_list));
+        let list = chat_list.portal_list(cx, ids!(list));
+        for (item_id, text) in messages {
+            if let Some((_, item)) = list.get_item(item_id) {
+                // Re-feed the whole markdown (keeps non-splash content current).
+                let unwrapped = unwrap_outer_markdown_fence(&text);
+                let rendered = wrap_bare_latex(unwrapped);
+                let rendered = resolve_a2app_placeholders(&rendered, count);
+                item.markdown(cx, ids!(selectable)).set_text(cx, &rendered);
+                // Also push the resolved `runsplash` body straight to the
+                // Splash widget — its `set_text` re-evals on change, and this
+                // guarantees the update even if the markdown re-parse doesn't
+                // re-dispatch to the pooled splash_view.
+                if let Some(body) = extract_runsplash_body(&text) {
+                    let resolved = resolve_a2app_placeholders(body, count);
+                    item.widget(cx, ids!(splash_view)).set_text(cx, &resolved);
+                }
+            }
+        }
+        cx.redraw_all();
+    }
+
+    /// Drive the toast strip from `APP_STATE.toasts`. Shows the front
+    /// (oldest) queued toast for a few seconds, then the timer dismisses it
+    /// and advances to the next. No-op while a toast is already on screen
+    /// (`toast_timer` non-empty).
+    fn sync_toasts(&mut self, cx: &mut Cx) {
+        if !self.toast_timer.is_empty() {
+            return;
+        }
+        let front = APP_STATE
+            .read()
+            .ok()
+            .and_then(|s| s.toasts.iter().next().cloned());
+        match front {
+            Some(t) => {
+                self.ui.label(cx, ids!(toast_label)).set_text(cx, &t.message);
+                self.ui.view(cx, ids!(toast_row)).set_visible(cx, true);
+                self.toast_timer = cx.start_timeout(3.8);
+                cx.redraw_all();
+            }
+            None => {
+                self.ui.view(cx, ids!(toast_row)).set_visible(cx, false);
+            }
+        }
+    }
+
+    /// Top-bar context-usage chip. Reads `APP_STATE.context` (updated every
+    /// turn from `context/normalization`) and shows the model context-window
+    /// fill — e.g. `◔ 10k · 68 msgs`. Blank until the first turn reports.
+    fn update_context_indicator(&self, cx: &mut Cx) {
+        let ctx = APP_STATE.read().ok().and_then(|s| s.context.clone());
+        let text = match ctx {
+            Some(c) => {
+                let tok = c.token_estimate;
+                let tok_str = if tok >= 1000 {
+                    format!("{:.1}k", tok as f64 / 1000.0)
+                } else {
+                    format!("{tok}")
+                };
+                format!("\u{25D4} {tok_str} \u{00B7} {} msgs", c.item_count)
+            }
+            None => String::new(),
+        };
+        self.ui.label(cx, ids!(context_chip)).set_text(cx, &text);
+    }
+
     fn apply_glass_opacity(&self, cx: &mut Cx, opacity: f64) {
         let opacity = opacity.clamp(MIN_GLASS_OPACITY, MAX_GLASS_OPACITY);
         let glass = glass_opacity_values(opacity);
@@ -2766,32 +3081,16 @@ impl App {
             .map(|s| s.navigation.clone())
             .unwrap_or_default();
         let is_content = matches!(nav, CurrentScreen::Content);
-        let is_coding = matches!(nav, CurrentScreen::Coding);
-        let is_studio = matches!(nav, CurrentScreen::Studio { .. });
-        let is_slides = matches!(nav, CurrentScreen::Slides { .. });
-        let is_sites = matches!(nav, CurrentScreen::Sites { .. });
-        // Chat is the implicit default — show it for any other screen
-        // that doesn't have its own dedicated sibling here.
-        let is_chat =
-            !is_content && !is_coding && !is_studio && !is_slides && !is_sites;
+        // Chat is the implicit default — show it for any other navigation
+        // state (incl. the removed Coding / Studio / Slides / Sites states,
+        // should the store ever carry them).
+        let is_chat = !is_content;
         self.ui
             .view(cx, ids!(chat_screen))
             .set_visible(cx, is_chat);
         self.ui
             .view(cx, ids!(content_screen))
             .set_visible(cx, is_content);
-        self.ui
-            .view(cx, ids!(coding_screen))
-            .set_visible(cx, is_coding);
-        self.ui
-            .view(cx, ids!(studio_screen))
-            .set_visible(cx, is_studio);
-        self.ui
-            .view(cx, ids!(slides_screen))
-            .set_visible(cx, is_slides);
-        self.ui
-            .view(cx, ids!(sites_screen))
-            .set_visible(cx, is_sites);
         self.ui.redraw(cx);
     }
 
@@ -2810,47 +3109,26 @@ impl App {
         self.fire_content_hydrate();
     }
 
-    /// Sidebar `nav_coding` click — flip to Coding. The screen reads
-    /// `APP_STATE.approvals` directly so there's no separate hydrate.
-    fn navigate_to_coding(&mut self, cx: &mut Cx) {
-        {
-            let mut state = APP_STATE.write().unwrap();
-            octos_app_store::state::reduce(
-                &mut state,
-                octos_app_store::state::Event::Navigation(
-                    NavigationEvent::NavigateTo(CurrentScreen::Coding),
-                ),
-            );
-        }
-        self.show_screen_for_nav(cx);
-    }
+    // navigate_to_coding / navigate_to_producer removed with the Coding /
+    // Studio / Slides / Sites navs (unsupported in this build).
 
-    /// W07 — sidebar `nav_studio/slides/sites` click. Flip to the
-    /// matching producer with `project: None` (the empty-index state).
-    /// Once `OpenProject` lands, replace this with a call into the
-    /// project-list-driven dispatch.
-    fn navigate_to_producer(&mut self, cx: &mut Cx, kind: crate::app::producers::ProducerKind) {
-        let target = match kind {
-            crate::app::producers::ProducerKind::Studio => {
-                CurrentScreen::Studio { project: None }
-            }
-            crate::app::producers::ProducerKind::Slides => {
-                CurrentScreen::Slides { project: None }
-            }
-            crate::app::producers::ProducerKind::Sites => {
-                CurrentScreen::Sites { project: None }
-            }
-        };
-        {
-            let mut state = APP_STATE.write().unwrap();
-            octos_app_store::state::reduce(
-                &mut state,
-                octos_app_store::state::Event::Navigation(
-                    NavigationEvent::NavigateTo(target),
-                ),
-            );
+    /// Phone-width helper: the desktop shell keeps sidebar and chat side by
+    /// side, which pushes the chat off-screen on a portrait phone. Collapse
+    /// the sidebar after sidebar-driven navigation when the window is
+    /// narrow; the top-bar ☰ button brings it back.
+    fn collapse_sidebar_if_narrow(&self, cx: &mut Cx) {
+        let w = self
+            .ui
+            .window(cx, ids!(main_window))
+            .get_inner_size(cx)
+            .x;
+        if w > 0.0 && w < 600.0 {
+            self.ui.view(cx, ids!(sidebar)).set_visible(cx, false);
+            // The glass-opacity toolbar is a desktop nicety; its 318pt
+            // fixed width alone overflows a phone top bar.
+            self.ui.view(cx, ids!(glass_toolbar)).set_visible(cx, false);
+            cx.redraw_all();
         }
-        self.show_screen_for_nav(cx);
     }
 
     /// Spawn an off-thread `task/output/read` and post the reply back as
@@ -2933,14 +3211,16 @@ impl App {
             let client = Self::build_rest_client(&cfg);
             viewers_mod::fetch_markdown(client, handle);
         }
-        self.ui.redraw(cx);
+        // Full repaint — overlay visibility flip (see `show_login`).
+        cx.redraw_all();
     }
 
     fn close_viewer(&self, cx: &mut Cx) {
         if let Ok(mut vs) = VIEWER_STATE.write() {
             vs.open = OpenViewer::Closed;
         }
-        self.ui.redraw(cx);
+        // Full repaint — overlay visibility flip (see `show_login`).
+        cx.redraw_all();
     }
 
     /// Image album prev/next — clamps to [0, len).
@@ -2978,7 +3258,12 @@ impl App {
     fn show_login(&self, cx: &mut Cx, show: bool) {
         self.ui.view(cx, ids!(app_shell)).set_visible(cx, !show);
         self.ui.view(cx, ids!(login_overlay)).set_visible(cx, show);
-        self.ui.redraw(cx);
+        // Full repaint, not just `ui.redraw`: the glass widgets draw into
+        // self-managed overlay draw lists, and a partial redraw can leave a
+        // stale composite on screen after a visibility flip (on Android this
+        // showed as a black boot screen / a login card that never dismissed —
+        // same failure mode aichat documents in its `clear_chat`).
+        cx.redraw_all();
     }
 
     /// Push a status / error string to the LoginScreen status label. Empty
@@ -3053,16 +3338,26 @@ impl App {
             self.login_set_status(cx, &format!("Failed to save server config: {e}"));
             return;
         }
-        self.login_server_url = Some(parsed);
+        self.login_server_url = Some(parsed.clone());
         self.login_profile_id = Some(ProfileId::from(pid_trimmed.to_string()));
-        self.login_set_status(cx, "");
         self.ui
             .view(cx, ids!(login_server_step))
             .set_visible(cx, false);
-        self.ui
-            .view(cx, ids!(login_email_step))
-            .set_visible(cx, true);
+        // Before falling back to the email OTP flow, try the password-free
+        // solo sign-in that `octos serve --solo` exposes (same flow as
+        // octos-web's local sign-in button). The email step only appears if
+        // solo is unavailable (SoloReply handler below).
+        self.login_set_status(cx, "Trying password-free sign-in…");
         self.ui.redraw(cx);
+        let url = parsed;
+        let pid = ProfileId::from(pid_trimmed.to_string());
+        std::thread::spawn(move || {
+            let outcome = run_blocking_solo_login(&url, &pid);
+            Cx::post_action(LoginAsyncAction {
+                kind: LoginAsyncEvent::SoloReply,
+                error: outcome.err(),
+            });
+        });
     }
 
     /// Step 2 — `Send code` button. Drives `POST /api/auth/send-code`
@@ -3149,24 +3444,46 @@ impl App {
             }
         }
         self.login_pending_email = None;
-        let has_server = crate::app::login::load_server_config().is_some();
+        // Login-free flow: dropping the bearer just re-provisions in the
+        // background (fresh solo identity/token); the shell stays up.
+        self.auto_solo_login(cx);
+    }
+
+    /// Background password-free sign-in. Ensures a server config exists
+    /// (default: the on-device solo server) and spawns the solo attempt;
+    /// the reply lands as `LoginAsyncEvent::SoloReply` in `handle_actions`.
+    fn auto_solo_login(&mut self, cx: &mut Cx) {
+        const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:50080";
+        const DEFAULT_PROFILE: &str = "octos";
+        if crate::app::login::load_server_config().is_none() {
+            let cfg = crate::app::login::ServerConfig {
+                server_url: DEFAULT_SERVER_URL.to_string(),
+                profile_id: DEFAULT_PROFILE.to_string(),
+            };
+            if let Err(e) = crate::app::login::save_server_config(&cfg) {
+                log::warn!("auto-solo: save default server config: {e}");
+            }
+        }
+        let Some(cfg) = crate::app::login::load_server_config() else {
+            return;
+        };
+        let Ok(url) = url::Url::parse(&cfg.server_url) else {
+            log::warn!("auto-solo: bad server_url in config");
+            return;
+        };
+        let pid = ProfileId::from(cfg.profile_id.clone());
+        self.login_server_url = Some(url.clone());
+        self.login_profile_id = Some(pid.clone());
         self.ui
-            .view(cx, ids!(login_server_step))
-            .set_visible(cx, !has_server);
-        self.ui
-            .view(cx, ids!(login_email_step))
-            .set_visible(cx, has_server);
-        self.ui
-            .view(cx, ids!(login_code_step))
-            .set_visible(cx, false);
-        self.ui
-            .text_input(cx, ids!(login_email_input))
-            .set_text(cx, "");
-        self.ui
-            .text_input(cx, ids!(login_code_input))
-            .set_text(cx, "");
-        self.login_set_status(cx, "");
-        self.show_login(cx, true);
+            .label(cx, ids!(status_label))
+            .set_text(cx, "Signing in…");
+        std::thread::spawn(move || {
+            let outcome = run_blocking_solo_login(&url, &pid);
+            Cx::post_action(LoginAsyncAction {
+                kind: LoginAsyncEvent::SoloReply,
+                error: outcome.err(),
+            });
+        });
     }
 }
 
@@ -3235,7 +3552,105 @@ fn run_blocking_verify(
     })
 }
 
-/// Discriminator for cross-thread login replies. Carrying both arms through
+/// Password-free sign-in against a server running `octos serve --solo`:
+/// `POST /api/auth/solo` re-login first, then `POST /api/auth/solo/create`
+/// on 404 (no solo owner yet) — mirroring octos-web's local sign-in. Stores
+/// the bearer under the same keychain key the OTP flow uses.
+fn run_blocking_solo_login(
+    server_url: &url::Url,
+    profile_id: &ProfileId,
+) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    struct SoloUserLite {
+        id: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct SoloCreateLite {
+        profile_id: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct SoloTokenResp {
+        token: String,
+        // `POST /api/auth/solo` re-login returns the existing owner; adopt
+        // its id so the bearer keys/config match the server's identity even
+        // when the local default profile guess differs.
+        #[serde(default)]
+        user: Option<SoloUserLite>,
+        #[serde(default)]
+        result: Option<SoloCreateLite>,
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("tokio runtime: {e}"))?;
+    let host = octos_app_store::auth::ServerHost::from(
+        crate::app::login::host_from_url(server_url),
+    );
+    let pid = profile_id.clone();
+    rt.block_on(async move {
+        let client = reqwest::Client::new();
+        let login_url = server_url
+            .join("api/auth/solo")
+            .map_err(|e| format!("solo url: {e}"))?;
+        let resp = client
+            .post(login_url)
+            .send()
+            .await
+            .map_err(|e| format!("solo sign-in: {e}"))?;
+        let parsed = match resp.status().as_u16() {
+            200 => resp
+                .json::<SoloTokenResp>()
+                .await
+                .map_err(|e| format!("solo response: {e}"))?,
+            404 => {
+                // No solo owner yet — create it (server must be in --solo
+                // mode; anything else 403s below).
+                let create_url = server_url
+                    .join("api/auth/solo/create")
+                    .map_err(|e| format!("solo create url: {e}"))?;
+                let body = serde_json::json!({
+                    "name": pid.as_str(),
+                    "username": pid.as_str(),
+                    "email": format!("{}@octos.local", pid.as_str()),
+                });
+                let resp = client
+                    .post(create_url)
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| format!("solo create: {e}"))?;
+                if !resp.status().is_success() {
+                    return Err(format!("solo create: HTTP {}", resp.status()));
+                }
+                resp.json::<SoloTokenResp>()
+                    .await
+                    .map_err(|e| format!("solo create response: {e}"))?
+            }
+            403 => return Err("Solo sign-in is disabled on this server".to_string()),
+            s => return Err(format!("solo sign-in: HTTP {s}")),
+        };
+        // Adopt the server's owner identity (re-login returns the existing
+        // solo owner even when our local profile guess differs) and keep the
+        // on-disk config in lockstep so `resolve_bearer` finds the token.
+        let owner = parsed
+            .user
+            .map(|u| u.id)
+            .or(parsed.result.map(|r| r.profile_id))
+            .unwrap_or_else(|| pid.as_str().to_owned());
+        let owner_pid = octos_app_store::auth::ProfileId::from(owner.clone());
+        let secret = octos_app_store::auth::SecretToken::from(parsed.token);
+        octos_app_store::keychain::store_token(&host, &owner_pid, &secret)
+            .map_err(|e| format!("store_token: {e}"))?;
+        let _ = crate::app::login::save_server_config(&crate::app::login::ServerConfig {
+            server_url: server_url.to_string(),
+            profile_id: owner,
+        });
+        Ok(())
+    })
+}
+
+/// Discriminator for cross-thread login replies. Carrying all arms through
 /// one `ActionTrait` (auto-derived from `Debug + 'static` per
 /// `aichat/platform/src/action.rs:21`) keeps the `Cx::post_action`
 /// boilerplate down.
@@ -3243,6 +3658,8 @@ fn run_blocking_verify(
 enum LoginAsyncEvent {
     SendCodeReply,
     VerifyReply,
+    /// Password-free `--solo` attempt fired by the Step-1 `Continue` button.
+    SoloReply,
 }
 
 #[derive(Debug)]
@@ -3267,12 +3684,39 @@ impl MatchEvent for App {
         // composer; W08 may repurpose it as a per-session preference.
         let _ = self.ui.check_box(cx, ids!(thinking_toggle)).changed(actions);
 
+        // Splash toggle drives `splash_mode` for the next message.
+        if let Some(active) = self.ui.check_box(cx, ids!(splash_toggle)).changed(actions) {
+            self.splash_mode = active;
+        }
+
         // Markdown link click — dispatch through robius-open for cross-platform
         // coverage (macOS/Linux/Windows/iOS/Android/WASM). Desktop requires a
         // modifier (Cmd on macOS, Cmd/Ctrl elsewhere) so plain clicks stay
         // available for drag-selection inside the Markdown widget; mobile &
         // web have no modifier concept, so a plain tap opens the URL.
         for action in actions {
+            // Button press inside LLM-generated A2App/Splash UI. Update the
+            // live counter from common event names and redraw so the
+            // `{{state.count}}` placeholder reflects the new value; also toast
+            // the action so any event is visibly acknowledged.
+            if let makepad_widgets::SplashAction::Notify { event_id, .. } = action.cast() {
+                let ev = event_id.to_lowercase();
+                let mut changed = true;
+                if let Ok(mut data) = CHAT_DATA.write() {
+                    if ev.contains("inc") || ev.contains("plus") || ev.contains("add") {
+                        data.a2app_count += 1;
+                    } else if ev.contains("dec") || ev.contains("minus") || ev.contains("sub") {
+                        data.a2app_count -= 1;
+                    } else if ev.contains("reset") || ev.contains("clear") {
+                        data.a2app_count = 0;
+                    } else {
+                        changed = false;
+                    }
+                }
+                if changed {
+                    self.refresh_a2app_templates(cx);
+                }
+            }
             if let Some(widget_action) = action.as_widget_action() {
                 if let makepad_widgets::markdown::MarkdownAction::LinkNavigated { url, modifiers } =
                     widget_action.cast()
@@ -3312,6 +3756,32 @@ impl MatchEvent for App {
         }
         if self.ui.button(cx, ids!(clear_button)).clicked(actions) {
             self.clear_chat(cx);
+        }
+        // Sidebar `+ 新对话` — same semantics as Clear: wipe the local chat
+        // surface and open a fresh session on the wire. On phone-width
+        // windows also collapse the sidebar so the chat surface (previously
+        // pushed off-screen) becomes visible — this is what makes the button
+        // *look* like it did something on a portrait phone.
+        if self.ui.button(cx, ids!(nav_new)).clicked(actions) {
+            self.clear_chat(cx);
+            {
+                let mut state = APP_STATE.write().unwrap();
+                octos_app_store::state::reduce(
+                    &mut state,
+                    octos_app_store::state::Event::Navigation(
+                        NavigationEvent::NavigateTo(CurrentScreen::Home),
+                    ),
+                );
+            }
+            self.show_screen_for_nav(cx);
+            self.collapse_sidebar_if_narrow(cx);
+        }
+        // Top-bar ☰ — bring the collapsed sidebar back (or hide it again).
+        if self.ui.button(cx, ids!(nav_toggle)).clicked(actions) {
+            let sidebar = self.ui.view(cx, ids!(sidebar));
+            let vis = sidebar.borrow().map(|v| v.visible()).unwrap_or(true);
+            sidebar.set_visible(cx, !vis);
+            cx.redraw_all();
         }
         if self
             .ui
@@ -3387,6 +3857,33 @@ impl MatchEvent for App {
                         self.ui
                             .view(cx, ids!(login_code_step))
                             .set_visible(cx, false);
+                        // Pick up the fresh bearer without an app restart.
+                        self.connect_transport(cx);
+                        self.clear_chat(cx);
+                    }
+                }
+                LoginAsyncEvent::SoloReply => {
+                    if let Some(err) = la.error.as_ref() {
+                        // Login-free flow: no OTP fallback UI — surface the
+                        // reason on the shell status line and stay up.
+                        self.ui.label(cx, ids!(status_label)).set_text(
+                            cx,
+                            &format!("Sign-in unavailable: {err}"),
+                        );
+                        self.ui.redraw(cx);
+                    } else {
+                        // Refresh cached identity from the (possibly
+                        // solo-rewritten) server config before connecting.
+                        if let Some(cfg) = crate::app::login::load_server_config() {
+                            if let Ok(u) = url::Url::parse(&cfg.server_url) {
+                                self.login_server_url = Some(u);
+                            }
+                            self.login_profile_id =
+                                Some(ProfileId::from(cfg.profile_id));
+                        }
+                        // Pick up the fresh bearer without an app restart.
+                        self.connect_transport(cx);
+                        self.clear_chat(cx);
                     }
                 }
             }
@@ -3407,20 +3904,8 @@ impl MatchEvent for App {
             }
         }
 
-        // Handle message deletion
-        let chat_list = self.ui.widget(cx, ids!(chat_list));
-        let list = chat_list.portal_list(cx, ids!(list));
-        for (item_id, item) in list.items_with_actions(actions) {
-            if item.button(cx, ids!(delete_button)).pressed(actions) {
-                let mut data = CHAT_DATA.write().unwrap();
-                if item_id < data.messages.len() {
-                    data.messages.remove(item_id);
-                    data.save_to_disk();
-                }
-                drop(data);
-                self.ui.redraw(cx);
-            }
-        }
+        // (Per-message delete handler removed with the bubble close buttons
+        // — user directive.)
 
         // W04 — fold `SessionListAction`s posted from REST hydrate / delete
         // tasks plus the `SessionList` widget's own click events. See
@@ -3566,23 +4051,11 @@ impl MatchEvent for App {
         // ---- W04 / M2 — Content nav + filter wiring ----------------------
         if self.ui.button(cx, ids!(nav_content)).clicked(actions) {
             self.navigate_to_content(cx);
+            self.collapse_sidebar_if_narrow(cx);
         }
 
-        // ---- W06 / M3 — Coding nav button --------------------------------
-        if self.ui.button(cx, ids!(nav_coding)).clicked(actions) {
-            self.navigate_to_coding(cx);
-        }
-
-        // ---- W07 / M3 — Studio / Slides / Sites nav buttons -----------
-        if self.ui.button(cx, ids!(nav_studio)).clicked(actions) {
-            self.navigate_to_producer(cx, crate::app::producers::ProducerKind::Studio);
-        }
-        if self.ui.button(cx, ids!(nav_slides)).clicked(actions) {
-            self.navigate_to_producer(cx, crate::app::producers::ProducerKind::Slides);
-        }
-        if self.ui.button(cx, ids!(nav_sites)).clicked(actions) {
-            self.navigate_to_producer(cx, crate::app::producers::ProducerKind::Sites);
-        }
+        // (Coding / Studio / Slides / Sites navs removed — unsupported in
+        // this build.)
 
         // ---- W07 / M3 — ProducerUiAction (source add / open external) -
         for action in actions {
@@ -3752,35 +4225,37 @@ impl MatchEvent for App {
     }
 
     fn handle_startup(&mut self, cx: &mut Cx) {
+        // Android: route the real `log` facade (transport/store crates) to
+        // logcat — without this their records are dropped silently.
+        octos_app_transport::install_android_logger();
+
+        // Android: the process has no usable HOME, and everything below
+        // (server.json, the token store, chat persistence) is HOME-relative.
+        // Point HOME at the app-private files dir makepad reports from
+        // `getFilesDir()` before any config path is resolved.
+        #[cfg(target_os = "android")]
+        if let Some(dir) = cx.get_data_dir() {
+            std::env::set_var("HOME", &dir);
+        }
+
+        // No-UI provisioning: a `makepad.APP_CONFIG` launch-intent extra
+        // (`adb shell am start … --es makepad.APP_CONFIG
+        // 'http://host:port|profile|token'`) surfaces here as the
+        // MAKEPAD_APP_CONFIG env var. It writes the server config + bearer
+        // BEFORE the boot-auth decision, so a provisioned device lands
+        // straight on the home shell — no LoginScreen typing. A QR-scan
+        // onboarding can feed the same `apply_provision_string` entry later.
+        if let Ok(prov) = std::env::var("MAKEPAD_APP_CONFIG") {
+            match crate::app::login::apply_provision_string(&prov) {
+                Ok(()) => log::info!("provisioned from launch intent"),
+                Err(e) => log::warn!("provisioning failed: {e}"),
+            }
+        }
+
         // Construct the OctosUiAgent up-front so the chat surface has
-        // somewhere to send a prompt. The transport is lazy: `create_session`
-        // is `todo!()` until W01 wires it, so the user-visible state stays
-        // "Initializing..." until we plug in the real wire calls. M1 ships
-        // without a real session — the empty-state stays on screen.
-        let transport_config = Self::placeholder_transport_config();
-        // W04 — kick off the REST session hydrate before the agent steals
-        // the config. Empty bearer means we expect a 401; the failure path
-        // is silent in M1 (toast queue lands in M2). When `OCTOS_BEARER` is
-        // set in the environment, the list populates within `~ 500 ms p95`
-        // per W04 § 12.
-        log::info!(
-            "boot transport: base_url={} profile_id={}",
-            transport_config.base_url, transport_config.profile_id.0
-        );
-        let rest_client = Self::build_rest_client(&transport_config);
-        let fallback_profile = octos_app_store::auth::ProfileId::from(
-            transport_config.profile_id.0.clone(),
-        );
-        // W04 follow-up #5 — fire `/api/version` on boot, log
-        // version + service, warn on a mismatched server. Off-thread so we
-        // don't stall `handle_startup`.
-        Self::probe_version(Self::build_rest_client(&transport_config));
-        sessions_mod::hydrate_sessions(rest_client, fallback_profile);
-        let (agent, approval_handle, task_output_handle) =
-            Self::create_octos_agent(transport_config);
-        self.agent = Some(agent);
-        self.approval_handle = Some(approval_handle);
-        self.task_output_handle = Some(task_output_handle);
+        // somewhere to send a prompt (config/token state as currently on
+        // disk; re-run by the login flow once a fresh bearer lands).
+        self.connect_transport(cx);
 
         // Profile dropdown. W08 will populate `available_profiles` from
         // `/api/my/profile`; for M1 we hand the dropdown the stub label
@@ -3797,6 +4272,7 @@ impl MatchEvent for App {
 
         self.update_status(cx);
         self.update_connection_indicator(cx);
+        self.update_context_indicator(cx);
         self.update_empty_state_visibility(cx);
         self.ui
             .slider(cx, ids!(opacity_slider))
@@ -3806,29 +4282,31 @@ impl MatchEvent for App {
         self.apply_glass_opacity(cx, DEFAULT_GLASS_OPACITY);
 
         // ---- W08 — boot decision: LoginScreen vs Home ---------------------
+        // Login-free boot (user directive): the LoginScreen is never shown.
+        // Auth resolves silently — stored bearer > background solo sign-in
+        // against the configured (or default on-device) server. Provisioning
+        // stays available via the `makepad.APP_CONFIG` intent extra.
         let authed = self.boot_is_authed();
-        // Step 1 hides itself once a server has been configured (the
-        // `boot_is_authed` side-effect set `login_server_url`); Step 2 is
-        // the natural entry point on a re-launch with no token.
-        let has_server = self.login_server_url.is_some();
-        self.ui
-            .view(cx, ids!(login_server_step))
-            .set_visible(cx, !has_server);
-        self.ui
-            .view(cx, ids!(login_email_step))
-            .set_visible(cx, has_server);
-        self.ui
-            .view(cx, ids!(login_code_step))
-            .set_visible(cx, false);
-        self.show_login(cx, !authed);
+        self.show_login(cx, false);
         // W04 / M2 — make sure the chat_screen / content_screen pair
         // matches the boot navigation state (defaults to Home → Chat).
         self.show_screen_for_nav(cx);
+        if authed {
+            // Open the first session immediately so the composer is live.
+            self.clear_chat(cx);
+        } else {
+            self.auto_solo_login(cx);
+        }
+        // Phone boot: land on the chat surface, not the menu — ☰ opens it.
+        self.collapse_sidebar_if_narrow(cx);
     }
 }
 
 impl AppMain for App {
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+        // NOTE: `agent.notify(...)` for A2App/Splash button callbacks is
+        // registered inside `makepad_widgets::script_mod` so it reaches the
+        // isolated Splash VMs too (see aichat/widgets/src/lib.rs).
         crate::makepad_widgets::script_mod(vm);
         crate::makepad_code_editor::script_mod(vm);
         crate::makepad_diagram_kit::script_mod(vm);
@@ -3844,6 +4322,8 @@ impl AppMain for App {
         // and `viewer_overlay := ViewerOverlay {}` references resolve.
         crate::app::content_browser::script_mod(vm);
         crate::app::viewers::script_mod(vm);
+        // Swimming-octopus thinking indicator (chat screen, above composer).
+        crate::app::octo_thinking::script_mod(vm);
         // W06 / M3 — register `CodingScreen` so the live-DSL
         // `coding_screen := CodingScreen {}` sibling resolves.
         crate::app::coding::script_mod(vm);
@@ -3864,6 +4344,27 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Toast auto-dismiss: pop the shown toast and advance to the next.
+        if self.toast_timer.is_event(event).is_some() {
+            self.toast_timer = Timer::empty();
+            if let Ok(mut state) = APP_STATE.write() {
+                octos_app_store::state::reduce(
+                    &mut state,
+                    octos_app_store::state::Event::DismissOldestToast,
+                );
+            }
+            self.sync_toasts(cx);
+        }
+        // Android: window size may be unknown during handle_startup, so
+        // re-apply the phone-boot sidebar collapse once the first real
+        // layout exists.
+        if let Event::Draw(_) = event {
+            static FIRST_DRAW: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(true);
+            if FIRST_DRAW.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.collapse_sidebar_if_narrow(cx);
+            }
+        }
         if let Event::WindowDragQuery(dq) = event {
             if Some(dq.window_id) == self.ui.window(cx, ids!(main_window)).window_id() {
                 let size = self.ui.window(cx, ids!(main_window)).get_inner_size(cx);
@@ -3876,6 +4377,28 @@ impl AppMain for App {
 
         self.match_event(cx, event);
         self.ui.handle_event(cx, event, &mut Scope::empty());
+
+        // Transport wake-ups arrive as signals; refresh the top-bar
+        // connection dot/label from APP_STATE so Live/Reconnecting/Offline
+        // tracks reality instead of the boot snapshot.
+        if let Event::Signal = event {
+            self.update_connection_indicator(cx);
+        self.update_context_indicator(cx);
+            // Streaming state flips on transport events — keep the octopus
+            // (and empty-state) in sync even when no widget action fired.
+            self.update_empty_state_visibility(cx);
+            // Re-assert the Profile pill: a set_labels issued during
+            // handle_startup can land on a not-yet-ready widget ref and
+            // silently no-op, leaving the "(no profile)" stub on screen.
+            if let Some((_, label)) = self.available_profiles.first() {
+                let dd = self.ui.drop_down(cx, ids!(backend_dropdown));
+                if &dd.selected_label() != label {
+                    dd.set_labels(cx, vec![label.clone()]);
+                    dd.set_selected_item(cx, 0);
+                    dd.redraw(cx);
+                }
+            }
+        }
 
         if let Some(agent) = &mut self.agent {
             for event in agent.handle_event(cx, event) {
@@ -3941,6 +4464,10 @@ impl AppMain for App {
                         self.current_prompt = None;
                         self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
                         self.update_empty_state_visibility(cx);
+                        // Clear the transient "Thinking..." status back to the
+                        // idle connection line (it was set by ThinkingDelta and
+                        // otherwise stuck after the reply landed).
+                        self.update_status(cx);
                         cx.redraw_all();
                     }
                     AgentEvent::PromptError { error, .. } => {
@@ -3973,6 +4500,13 @@ impl AppMain for App {
         // `APP_STATE.connection`; reading it here keeps the dot in sync
         // without a separate signal/post_action.
         self.update_connection_indicator(cx);
+        self.update_context_indicator(cx);
+        // Show any toasts queued by the store during this drain (compaction,
+        // memory-saved, warnings).
+        self.sync_toasts(cx);
+        // Keep the swimming-octopus row in lockstep with `is_streaming`
+        // (flips inside the agent drain above — actions, not signals).
+        self.update_empty_state_visibility(cx);
     }
 }
 

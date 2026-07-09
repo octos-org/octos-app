@@ -15,12 +15,19 @@ pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_APPROVAL_TYPED_V1 as APPROV
 pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_PANE_SNAPSHOTS_V1 as PANE_SNAPSHOTS_V1;
 // see octos-core ui_protocol.rs:36
 pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1 as SESSION_WORKSPACE_CWD_V1;
+// see octos-core ui_protocol.rs:214 — gates live `context/normalization` +
+// `context/compaction` events (the server withholds them unless requested).
+pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1 as CONTEXT_LIFECYCLE_V1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
     pub typed_approvals: bool,
     pub pane_snapshots: bool,
     pub session_workspace_cwd: bool,
+    /// Live context lifecycle events (`context/normalization` per turn +
+    /// `context/compaction`). Drives the context-usage chip and the
+    /// compaction toast — the server only streams these when requested.
+    pub context_lifecycle: bool,
     /// Everything the server advertised, including unknown features.
     #[serde(default)]
     pub raw: BTreeMap<String, Value>,
@@ -33,6 +40,7 @@ impl Capabilities {
             typed_approvals: true,
             pane_snapshots: true,
             session_workspace_cwd: true,
+            context_lifecycle: true,
             raw: BTreeMap::new(),
         }
     }
@@ -48,6 +56,9 @@ impl Capabilities {
         }
         if self.session_workspace_cwd {
             features.push(SESSION_WORKSPACE_CWD_V1.to_owned());
+        }
+        if self.context_lifecycle {
+            features.push(CONTEXT_LIFECYCLE_V1.to_owned());
         }
         for (feature, enabled) in &self.raw {
             if enabled.as_bool() == Some(true) && !features.iter().any(|f| f == feature) {
@@ -81,6 +92,7 @@ impl Capabilities {
                 APPROVAL_TYPED_V1 => caps.typed_approvals = true,
                 PANE_SNAPSHOTS_V1 => caps.pane_snapshots = true,
                 SESSION_WORKSPACE_CWD_V1 => caps.session_workspace_cwd = true,
+                CONTEXT_LIFECYCLE_V1 => caps.context_lifecycle = true,
                 _ => {}
             }
             caps.raw.insert(name.to_owned(), Value::Bool(true));
@@ -111,6 +123,7 @@ impl Capabilities {
                         APPROVAL_TYPED_V1 => out.typed_approvals = true,
                         PANE_SNAPSHOTS_V1 => out.pane_snapshots = true,
                         SESSION_WORKSPACE_CWD_V1 => out.session_workspace_cwd = true,
+                        CONTEXT_LIFECYCLE_V1 => out.context_lifecycle = true,
                         _ => {}
                     }
                 }
@@ -166,7 +179,7 @@ mod tests {
         caps.raw.insert("future.v1".into(), Value::Bool(true));
         assert_eq!(
             caps.handshake_header_value().as_deref(),
-            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, future.v1")
+            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, context.lifecycle.v1, future.v1")
         );
     }
 }

@@ -64,8 +64,10 @@ async fn live_smoke_session_open_and_turn() {
     let session_id = SessionKey::new("smoke", &uuid_short());
     let open = SessionOpenParams {
         session_id: session_id.clone(),
+        topic: None,
         profile_id: Some(profile.clone()),
         cwd: None,
+        sandbox: None,
         after: None,
     };
     cmd_tx
@@ -119,6 +121,11 @@ async fn live_smoke_session_open_and_turn() {
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
             input: vec![InputItem::Text { text: prompt.to_owned() }],
+            media: Vec::new(),
+            topic: None,
+            rewrite_for: None,
+            reasoning_effort: None,
+            live_video: false,
         }))
         .await
         .expect("send StartTurn");

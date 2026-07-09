@@ -24,3 +24,9 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"
 
 [lints]
 workspace = true
+
+# Android: logcat backend for the real `log` facade — without this, every
+# `log::` record from this crate and octos-app-store is silently dropped on
+# device (the app shell's `log::` macros are makepad's shim, not this facade).
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.14"

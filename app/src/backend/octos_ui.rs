@@ -69,6 +69,9 @@ pub struct OctosUiAgent {
     capabilities: Option<Capabilities>,
     /// Workspace cwd requested for every `session/open`, when configured.
     workspace_cwd: Option<String>,
+    /// Profile id from the transport config — fallback owner for sidebar
+    /// rows the server returns without a `profile_id` (session/list).
+    fallback_profile: String,
 }
 
 impl OctosUiAgent {
@@ -82,6 +85,7 @@ impl OctosUiAgent {
     /// without a server" requirement.
     pub fn new(config: TransportConfig) -> Self {
         let workspace_cwd = config.workspace_cwd.clone();
+        let fallback_profile = config.profile_id.0.clone();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -103,6 +107,7 @@ impl OctosUiAgent {
             connection_state: ConnectionState::Idle,
             capabilities: None,
             workspace_cwd,
+            fallback_profile,
         }
     }
 
@@ -168,6 +173,9 @@ impl OctosUiAgent {
                     g.pane_snapshots = caps.pane_snapshots;
                 }
                 self.capabilities = Some(caps);
+                // M12 D-5 — `GET /api/sessions` is retired; hydrate the
+                // sidebar over the wire once the connection is live.
+                self.post(OutboundCommand::ListSessions);
                 Vec::new()
             }
             TransportEvent::RpcResult(LifecycleResult::SessionOpen(open)) => {
@@ -210,6 +218,14 @@ impl OctosUiAgent {
                 // `octos-app-store/src/state.rs:148-152`.
                 self.fold_into_store(payload.clone(), None);
                 self.translate_notification(payload)
+            }
+            TransportEvent::SessionsListed { sessions } => {
+                // Same downstream path as the old REST hydrate: project and
+                // post `SessionListAction::Hydrated` for `handle_actions`.
+                let fallback =
+                    octos_app_store::auth::ProfileId::from(self.fallback_profile.clone());
+                crate::app::sessions::hydrate_from_ws_value(sessions, &fallback);
+                Vec::new()
             }
         }
     }
@@ -304,6 +320,19 @@ impl OctosUiAgent {
                     }]
                 })
                 .unwrap_or_default(),
+            // 2026-07 protocol catch-up: server-side reasoning stream maps
+            // onto the chat surface's thinking strip.
+            UiNotification::ReasoningDelta(ev) => self
+                .prompt_ids
+                .get(&ev.turn_id)
+                .copied()
+                .map(|pid| {
+                    vec![AgentEvent::ThinkingDelta {
+                        prompt_id: pid,
+                        text: ev.text,
+                    }]
+                })
+                .unwrap_or_default(),
             UiNotification::ToolStarted(ev) => self
                 .prompt_ids
                 .get(&ev.turn_id)
@@ -366,7 +395,34 @@ impl OctosUiAgent {
             | UiNotification::ProgressUpdated(_)
             | UiNotification::ReplayLossy(_)
             | UiNotification::SessionOpened(_)
-            | UiNotification::Warning(_) => Vec::new(),
+            | UiNotification::Warning(_)
+            // 2026-07 protocol catch-up — folded into APP_STATE (or
+            // deliberately unsurfaced) by the store reducer; nothing to
+            // bridge through AgentEvent. Kept explicit per the note above.
+            | UiNotification::UserQuestionRequested(_)
+            | UiNotification::VisualGenerating(_)
+            | UiNotification::VisualSucceeded(_)
+            | UiNotification::VisualFailed(_)
+            | UiNotification::VoiceExit(_)
+            | UiNotification::MessagePersisted(_)
+            | UiNotification::TurnSpawnComplete(_)
+            | UiNotification::FileAttached(_)
+            | UiNotification::SessionEventBridged(_)
+            | UiNotification::RouterStatus(_)
+            | UiNotification::RouterFailover(_)
+            | UiNotification::QueueState(_)
+            | UiNotification::AgentUpdated(_)
+            | UiNotification::AgentOutputDelta(_)
+            | UiNotification::AgentArtifactUpdated(_)
+            | UiNotification::SessionGoalUpdated(_)
+            | UiNotification::SessionGoalCleared(_)
+            | UiNotification::LoopUpdated(_)
+            | UiNotification::LoopFired(_)
+            | UiNotification::LoopCompleted(_)
+            | UiNotification::ContextCompactionCompleted(_)
+            | UiNotification::ContextNormalizationReported(_)
+            | UiNotification::SessionOrchestration(_)
+            | UiNotification::Envelope(_) => Vec::new(),
         }
     }
 }
@@ -375,12 +431,17 @@ impl Agent for OctosUiAgent {
     fn create_session(&mut self, _cx: &mut Cx, _config: SessionConfig) -> SessionId {
         let session_id = SessionId::new();
         let key = Self::make_session_key(session_id);
+        log::info!("octos-ui-agent: create_session → session/open {}", key.0);
         self.session_keys.insert(session_id, key.clone());
         self.session_ids.insert(key.clone(), session_id);
         self.post(OutboundCommand::OpenSession(SessionOpenParams {
             session_id: key,
+            // 2026-07 protocol catch-up: server-side session topic label and
+            // per-session sandbox override — both server-defaulted when None.
+            topic: None,
             profile_id: None,
             cwd: self.workspace_cwd.clone(),
+            sandbox: None,
             after: None,
         }));
         session_id
@@ -401,6 +462,14 @@ impl Agent for OctosUiAgent {
             input: vec![InputItem::Text {
                 text: text.to_owned(),
             }],
+            // 2026-07 protocol catch-up: attachments, topic routing, prompt
+            // rewrite, per-turn reasoning effort, and live-video capture are
+            // all opt-in; text-only turns send the neutral defaults.
+            media: Vec::new(),
+            topic: None,
+            rewrite_for: None,
+            reasoning_effort: None,
+            live_video: false,
         }));
         prompt_id
     }

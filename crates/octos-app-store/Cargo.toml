@@ -13,6 +13,8 @@ uuid        = { workspace = true }
 chrono      = { workspace = true }
 octos-core  = { workspace = true }
 keyring     = { workspace = true, optional = true }
+# Android keychain-fallback diagnostics (`crate::keychain` file-store path).
+log         = { workspace = true }
 
 [features]
 # OS-keychain helpers (`crate::keychain`). Off by default so unit tests stay

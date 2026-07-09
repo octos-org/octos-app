@@ -10,6 +10,15 @@ description = "Native Makepad-Splash desktop client for the Octos agentic OS"
 name = "octos-app"
 path = "src/main.rs"
 
+# Android: `cargo makepad android build` compiles the app as a cdylib
+# (`cargo rustc --lib --crate-type=cdylib`); `app_main!` emits the JNI
+# entrypoints instead of `fn main` there. Declaring the lib target keeps that
+# build inside the real workspace (cargo-makepad's fallback wrapper manifest
+# can't inherit `workspace.package` fields or `workspace = true` deps).
+[lib]
+name = "octos_app"
+path = "src/main.rs"
+
 [dependencies]
 # Makepad — path-deps to the aichat fork in ../../aichat (sibling repo).
 # Same set as aichat/examples/aichat.

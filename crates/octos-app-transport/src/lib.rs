@@ -13,6 +13,22 @@ pub mod jsonrpc;
 pub mod rest;
 pub mod ws;
 
+/// Install a logcat backend for the real `log` facade on Android. The app
+/// shell's `log::` macros route through makepad's shim (visible in logcat as
+/// tag `Makepad`), but this crate and `octos-app-store` log via the `log`
+/// crate — which drops every record silently until a logger is installed.
+/// Idempotent; no-op off Android.
+#[cfg(target_os = "android")]
+pub fn install_android_logger() {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("OctosApp"),
+    );
+}
+#[cfg(not(target_os = "android"))]
+pub fn install_android_logger() {}
+
 use std::collections::BTreeMap;
 
 use octos_core::app_ui::{
@@ -91,6 +107,10 @@ pub struct TransportConfig {
 pub enum OutboundCommand {
     /// Open / resume a session (see octos-core ui_protocol.rs:543).
     OpenSession(SessionOpenParams),
+    /// Fetch the session list over the wire (`session/list` — the M12 D-5
+    /// replacement for the retired `GET /api/sessions`). The reply surfaces
+    /// as `TransportEvent::SessionsListed`.
+    ListSessions,
     /// Begin a turn (see octos-core ui_protocol.rs:552).
     StartTurn(TurnStartParams),
     /// Abort a turn; idempotent on already-completed turns
@@ -141,6 +161,9 @@ pub enum TransportEvent {
     },
     /// Capability negotiation result, emitted once per `session/open`.
     CapabilityNegotiated(Capabilities),
+    /// Reply to `OutboundCommand::ListSessions` — the raw JSON array from
+    /// `session/list` (same rows the retired `GET /api/sessions` returned).
+    SessionsListed { sessions: serde_json::Value },
 }
 
 /// Typed lifecycle RPC results.

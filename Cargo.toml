@@ -47,9 +47,17 @@ log      = "0.4"
 makepad-widgets = { path = "../aichat/widgets" }
 
 [profile.release]
-lto              = "fat"
+# Fat LTO conflicts with the `-C prefer-dynamic` rustflag cargo-makepad uses
+# on Android to share libstd as a bundled .so ("cannot prefer dynamic linking
+# when performing LTO"). Default (thin-local) LTO keeps Android + desktop on
+# one profile; revisit with a desktop-only profile if binary size matters.
+lto              = false
 codegen-units    = 1
-panic            = "abort"
+# `panic = "abort"` breaks the Android cdylib link: the prebuilt std for
+# aarch64-linux-android ships the `panic_unwind` runtime, and `cargo makepad
+# android build` compiles the app as a cdylib against it. Unwind matches
+# makepad's own profiles; desktop behavior is unchanged apart from binary size.
+panic            = "unwind"
 strip            = "symbols"
 
 # Workspace-wide clippy policy. CI runs `cargo clippy --workspace

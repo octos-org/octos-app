@@ -15,7 +15,7 @@ use crate::turns::Turn;
 use chrono::Utc;
 use octos_core::app_ui::AppUiBackendEvent as UiNotification;
 // see octos-core ui_protocol.rs:62 (UiCursor), :69 (TurnId)
-use octos_core::ui_protocol::{TaskRuntimeState, TurnId, UiCursor};
+use octos_core::ui_protocol::{TaskRuntimeState, TurnId, UiContextState, UiCursor};
 use octos_core::{SessionKey, TaskId};
 use std::collections::HashMap;
 
@@ -54,6 +54,11 @@ pub struct AppState {
     pub ephemeral: Ephemeral,
     pub toasts: ToastQueue,
     pub connection: ConnectionState,
+    /// Latest server-reported context window state (token estimate, item
+    /// count, generation). Updated every turn from
+    /// `context/normalization` and on each `context/compaction`. Drives the
+    /// top-bar context-usage chip. `None` until the first turn completes.
+    pub context: Option<UiContextState>,
 }
 
 impl AppState {
@@ -163,6 +168,16 @@ fn route_session(n: &UiNotification) -> Option<&SessionKey> {
         UiNotification::Warning(e) => Some(&e.session_id),
         UiNotification::TurnCompleted(e) => Some(&e.session_id),
         UiNotification::TurnError(e) => Some(&e.session_id),
+        // 2026-07 protocol catch-up — session-scoped additions that should
+        // advance the replay cursor like their older siblings.
+        UiNotification::ReasoningDelta(e) => Some(&e.session_id),
+        UiNotification::ApprovalDecided(e) => Some(&e.session_id),
+        UiNotification::ApprovalCancelled(e) => Some(&e.session_id),
+        UiNotification::UserQuestionRequested(e) => Some(&e.session_id),
+        UiNotification::VisualGenerating(e) => Some(&e.session_id),
+        UiNotification::VisualSucceeded(e) => Some(&e.session_id),
+        UiNotification::VisualFailed(e) => Some(&e.session_id),
+        UiNotification::FileAttached(e) => Some(&e.session_id),
         // forward-compat per spec § 4.1 — unknown future variants don't
         // contribute a routable session_id; the cursor will simply not
         // advance for them, which is the safe default.
@@ -225,9 +240,20 @@ fn apply_protocol(state: &mut AppState, cursor: Option<UiCursor>, n: UiNotificat
             }
         }
         UiNotification::ToolCompleted(e) => {
+            // Memory *writes* are `memory_note` (the tool the agent actually
+            // calls) or `save_memory`; `recall_memory` is a read — exclude it.
+            let is_memory_save = matches!(e.tool_name.as_str(), "memory_note" | "save_memory")
+                && e.success != Some(false);
             let id = ToolCallId::from(e.tool_call_id);
             if let Some(tc) = state.tool_calls.get_mut(&id) {
                 tc.mark_completed(e.success, e.output_preview, now);
+            }
+            // Surface durable memory writes so the user knows the agent
+            // remembered something (MEMORY.md / episodic store).
+            if is_memory_save {
+                state
+                    .toasts
+                    .push(Toast::new(ToastKind::Info, "\u{1F9E0} Memory saved"));
             }
             recompute_active(state, &e.session_id);
         }
@@ -365,6 +391,105 @@ fn apply_protocol(state: &mut AppState, cursor: Option<UiCursor>, n: UiNotificat
                 format!("Replay lossy: {} dropped{cursor_hint}", e.dropped_count),
             ));
         }
+        // ——— 2026-07 protocol catch-up: variants added server-side since the
+        // M9 import (octos-core HEAD 07b1762). Meaningful state homes first;
+        // streams with no app surface yet are explicit no-ops so the next
+        // protocol addition fails this match on purpose (no `_` catch-all).
+        UiNotification::ReasoningDelta(e) => {
+            state.ephemeral.thinking_text.entry(e.turn_id.clone())
+                .or_default().push_str(&e.text);
+            if let Some(t) = state.turns.get_mut(&e.turn_id) { t.mark_streaming(); }
+            mark_streaming(state, &e.session_id, true);
+        }
+        UiNotification::UserQuestionRequested(e) => {
+            // No question-card widget yet: surface as a toast so the user
+            // knows the agent is blocked waiting on input.
+            state.toasts.push(Toast::new(
+                ToastKind::Info,
+                format!("Agent asks: {}", e.title),
+            ));
+        }
+        UiNotification::VisualGenerating(e) => {
+            state.toasts.push(Toast::new(
+                ToastKind::Info,
+                format!("Generating {}…", e.kind),
+            ));
+        }
+        UiNotification::VisualSucceeded(e) => {
+            let n = e.files.len();
+            state.toasts.push(Toast::new(
+                ToastKind::Info,
+                format!("{} ready ({n} file{})", e.kind, if n == 1 { "" } else { "s" }),
+            ));
+        }
+        UiNotification::VisualFailed(e) => {
+            state.toasts.push(Toast::new(
+                ToastKind::Error,
+                format!(
+                    "Visual generation failed: {}",
+                    e.reason.unwrap_or_else(|| "unknown".into())
+                ),
+            ));
+        }
+        UiNotification::RouterFailover(e) => {
+            state.toasts.push(Toast::new(
+                ToastKind::Info,
+                format!(
+                    "Provider failover {} → {} ({})",
+                    e.from_provider, e.to_provider, e.reason
+                ),
+            ));
+        }
+        // Attachment event carries path+mime but no server handle/size, so it
+        // can't fold into `state.files` (FileMeta) — history rehydrate
+        // delivers the real FileMeta for attachments.
+        UiNotification::FileAttached(_) => {}
+        // Durable-history bookkeeping; REST hydrate remains canonical.
+        UiNotification::MessagePersisted(_) => {}
+        // Sub-agent / orchestration surfaces are a follow-up workstream
+        // (multi-agent dock); no state home in the app shell yet.
+        UiNotification::TurnSpawnComplete(_) => {}
+        UiNotification::AgentUpdated(_) => {}
+        UiNotification::AgentOutputDelta(_) => {}
+        UiNotification::AgentArtifactUpdated(_) => {}
+        UiNotification::SessionOrchestration(_) => {}
+        UiNotification::SessionEventBridged(_) => {}
+        // Goals / loops render in octos-web only for now.
+        UiNotification::SessionGoalUpdated(_) => {}
+        UiNotification::SessionGoalCleared(_) => {}
+        UiNotification::LoopUpdated(_) => {}
+        UiNotification::LoopFired(_) => {}
+        UiNotification::LoopCompleted(_) => {}
+        // Router/queue telemetry and context maintenance are status-line
+        // material; only failover (above) is user-visible today.
+        UiNotification::RouterStatus(_) => {}
+        UiNotification::QueueState(_) => {}
+        UiNotification::ContextCompactionCompleted(e) => {
+            // Server compacted the conversation to fit the context window.
+            let before = e.compaction.token_estimate_before;
+            let after = e.compaction.token_estimate_after.unwrap_or(before);
+            let dropped = e.compaction.dropped_count;
+            state.context = Some(e.context_state);
+            state.toasts.push(Toast::new(
+                ToastKind::Info,
+                format!(
+                    "Context compacted — {} msgs summarized, ~{}k→{}k tokens",
+                    dropped,
+                    before / 1000,
+                    after / 1000,
+                ),
+            ));
+        }
+        UiNotification::ContextNormalizationReported(e) => {
+            // Emitted every turn as the server prepares the prompt — the
+            // running context-window state (token estimate, item count) for
+            // the top-bar usage chip.
+            state.context = Some(e.context_state);
+        }
+        // Voice sessions have no surface in octos-app yet.
+        UiNotification::VoiceExit(_) => {}
+        // Transport-level wrapper; the ws layer unwraps before folding.
+        UiNotification::Envelope(_) => {}
     }
 }
 
@@ -413,6 +538,32 @@ mod tests {
         state.sessions.insert(Session::new(key(k), pid(), "S", ts(0)));
     }
 
+    /// Fixture for `TaskUpdatedEvent` — the 2026-07 protocol added eight
+    /// optional metadata fields the reducer ignores; keep the tests focused
+    /// on the fields they exercise.
+    fn task_updated_fixture(
+        session: &str,
+        tid: &TaskId,
+        title: &str,
+        state: TaskRuntimeState,
+    ) -> TaskUpdatedEvent {
+        TaskUpdatedEvent {
+            session_id: key(session),
+            topic: None,
+            task_id: tid.clone(),
+            tool_call_id: None,
+            title: title.into(),
+            state,
+            runtime_detail: None,
+            source: None,
+            role: None,
+            summary: None,
+            artifact_count: None,
+            runtime_policy_stamp: None,
+            turn_id: None,
+        }
+    }
+
     #[test]
     fn reduce_durable_notification_updates_cursor() {
         let mut s = AppState::new();
@@ -422,6 +573,7 @@ mod tests {
             cursor: Some(cursor.clone()),
             notification: UiNotification::TurnStarted(TurnStartedEvent {
                 session_id: key("t:1"),
+                topic: None,
                 turn_id: turn(1),
                 timestamp: ts(100),
             }),
@@ -441,7 +593,7 @@ mod tests {
             reduce(&mut s, Event::Protocol {
                 cursor: None,
                 notification: UiNotification::MessageDelta(MessageDeltaEvent {
-                    session_id: key("t:1"), turn_id: turn(1), text: chunk.into(),
+                    session_id: key("t:1"), topic: None, turn_id: turn(1), text: chunk.into(),
                 }),
             });
         }
@@ -461,7 +613,8 @@ mod tests {
         reduce(&mut s, Event::Protocol {
             cursor: None,
             notification: UiNotification::TurnCompleted(TurnCompletedEvent {
-                session_id: key("t:1"), turn_id: turn(1), cursor: Some(cursor.clone()),
+                session_id: key("t:1"), topic: None, turn_id: turn(1), cursor: Some(cursor.clone()),
+                tokens_in: None, tokens_out: None, session_result: None,
             }),
         });
         assert!(!s.ephemeral.streaming_text.contains_key(&turn(1)));
@@ -478,7 +631,7 @@ mod tests {
         reduce(&mut s, Event::Protocol {
             cursor: None,
             notification: UiNotification::ToolStarted(ToolStartedEvent {
-                session_id: key("t:1"), turn_id: turn(1),
+                session_id: key("t:1"), topic: None, turn_id: turn(1),
                 tool_call_id: "call-x".into(), tool_name: "shell".into(), arguments: None,
             }),
         });
@@ -486,7 +639,7 @@ mod tests {
         reduce(&mut s, Event::Protocol {
             cursor: None,
             notification: UiNotification::ToolCompleted(ToolCompletedEvent {
-                session_id: key("t:1"), turn_id: turn(1),
+                session_id: key("t:1"), topic: None, turn_id: turn(1),
                 tool_call_id: "call-x".into(), tool_name: "shell".into(),
                 success: Some(true), output_preview: Some("done".into()), duration_ms: Some(10),
             }),
@@ -505,10 +658,9 @@ mod tests {
         for st in [TaskRuntimeState::Running, TaskRuntimeState::Completed] {
             reduce(&mut s, Event::Protocol {
                 cursor: None,
-                notification: UiNotification::TaskUpdated(TaskUpdatedEvent {
-                    session_id: key("t:1"), task_id: tid.clone(),
-                    title: "build".into(), state: st, runtime_detail: None,
-                }),
+                notification: UiNotification::TaskUpdated(task_updated_fixture(
+                    "t:1", &tid, "build", st,
+                )),
             });
         }
         assert!(!s.sessions.get(&key("t:1")).unwrap().has_active_task);
@@ -527,13 +679,9 @@ mod tests {
         for st in [TaskRuntimeState::Running, cancelled] {
             reduce(&mut s, Event::Protocol {
                 cursor: None,
-                notification: UiNotification::TaskUpdated(TaskUpdatedEvent {
-                    session_id: key("t:1"),
-                    task_id: tid.clone(),
-                    title: "build".into(),
-                    state: st,
-                    runtime_detail: None,
-                }),
+                notification: UiNotification::TaskUpdated(task_updated_fixture(
+                    "t:1", &tid, "build", st,
+                )),
             });
         }
         assert_eq!(
@@ -683,6 +831,7 @@ mod tests {
             cursor: None,
             notification: UiNotification::ToolStarted(ToolStartedEvent {
                 session_id: key("t:1"),
+                topic: None,
                 turn_id: turn(1),
                 tool_call_id: "call-x".into(),
                 tool_name: "shell".into(),
@@ -693,13 +842,9 @@ mod tests {
         let tid = TaskId::default();
         reduce(&mut s, Event::Protocol {
             cursor: None,
-            notification: UiNotification::TaskUpdated(TaskUpdatedEvent {
-                session_id: key("t:1"),
-                task_id: tid.clone(),
-                title: "build".into(),
-                state: TaskRuntimeState::Running,
-                runtime_detail: None,
-            }),
+            notification: UiNotification::TaskUpdated(task_updated_fixture(
+                "t:1", &tid, "build", TaskRuntimeState::Running,
+            )),
         });
         let mut metadata = UiProgressMetadata::new("status");
         metadata.progress_pct = Some(0.42);
@@ -741,6 +886,7 @@ mod tests {
             cursor: None,
             notification: UiNotification::ApprovalAutoResolved(ApprovalAutoResolvedEvent {
                 session_id: key("t:1"),
+                topic: None,
                 approval_id: aid.clone(),
                 turn_id: turn(1),
                 tool_name: "shell".into(),

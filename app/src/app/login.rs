@@ -307,6 +307,35 @@ pub fn save_server_config(cfg: &ServerConfig) -> std::io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Non-UI provisioning entry: parse `base_url|profile_id|token` (token
+/// optional) and persist the server config + bearer in one shot. Today this
+/// is fed by the `makepad.APP_CONFIG` launch-intent extra on Android; a QR
+/// onboarding screen can decode a scanned payload into the same call.
+pub fn apply_provision_string(prov: &str) -> Result<(), String> {
+    let mut parts = prov.trim().splitn(3, '|');
+    let url_str = parts.next().unwrap_or("");
+    let profile = parts.next().unwrap_or("").trim();
+    let token = parts.next().unwrap_or("").trim();
+    let url = validate_server_url(url_str)?;
+    if profile.is_empty() {
+        return Err("provision: profile id missing (want base_url|profile|token)".into());
+    }
+    save_server_config(&ServerConfig {
+        server_url: url.to_string(),
+        profile_id: profile.to_string(),
+    })
+    .map_err(|e| format!("provision: save config: {e}"))?;
+    if !token.is_empty() {
+        let host = octos_app_store::auth::ServerHost::from(host_from_url(&url));
+        let pid = octos_app_store::auth::ProfileId::from(profile.to_string());
+        let secret = octos_app_store::auth::SecretToken::from(token.to_string());
+        octos_app_store::keychain::store_token(&host, &pid, &secret)
+            .map_err(|e| format!("provision: store token: {e}"))?;
+    }
+    log::info!("provisioned profile `{profile}` @ {url}");
+    Ok(())
+}
+
 /// Cheap URL validation for the Step 1 input. Accepts `http://` and
 /// `https://`; surfaces a one-line error suitable for the status label.
 pub fn validate_server_url(s: &str) -> Result<url::Url, String> {
