@@ -107,10 +107,21 @@ pub struct TransportConfig {
 pub enum OutboundCommand {
     /// Open / resume a session (see octos-core ui_protocol.rs:543).
     OpenSession(SessionOpenParams),
+    /// Open a session WITHOUT the reconnect-replay cursor bracket. Used when
+    /// switching to a *different* session (sidebar resume): the connection's
+    /// in-memory cursor belongs to the previous session and the server
+    /// rejects a `session/open` whose `after` cursor references another
+    /// session. Also resets the shared cursor so later replays track the
+    /// newly-opened session.
+    OpenSessionFresh(SessionOpenParams),
     /// Fetch the session list over the wire (`session/list` — the M12 D-5
     /// replacement for the retired `GET /api/sessions`). The reply surfaces
     /// as `TransportEvent::SessionsListed`.
     ListSessions,
+    /// Reload an existing session's chat history (`session/hydrate`,
+    /// UPCR-2026-009; include=["messages"]). The reply surfaces as
+    /// `TransportEvent::SessionHydrated` with the raw result value.
+    HydrateSession { session_id: String },
     /// Begin a turn (see octos-core ui_protocol.rs:552).
     StartTurn(TurnStartParams),
     /// Abort a turn; idempotent on already-completed turns
@@ -164,6 +175,13 @@ pub enum TransportEvent {
     /// Reply to `OutboundCommand::ListSessions` — the raw JSON array from
     /// `session/list` (same rows the retired `GET /api/sessions` returned).
     SessionsListed { sessions: serde_json::Value },
+    /// Reply to `OutboundCommand::HydrateSession` — the raw
+    /// `SessionHydrateResult` JSON (decoded by the backend, which owns the
+    /// session-key context for routing it into the chat store).
+    SessionHydrated {
+        session_id: String,
+        result: serde_json::Value,
+    },
 }
 
 /// Typed lifecycle RPC results.

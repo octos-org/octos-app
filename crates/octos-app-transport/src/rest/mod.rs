@@ -63,9 +63,17 @@ impl From<url::ParseError> for RestError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionListItem {
+    /// The WS `session/list` rows (server `SessionInfo`,
+    /// `octos-cli/src/api/handlers.rs:555`) name this `id`; the retired
+    /// REST shape used `session_id`. Accept both.
+    #[serde(alias = "id")]
     pub session_id: SessionKey,
+    #[serde(default)]
     pub title: Option<String>,
+    /// `SessionInfo` calls this `updated_at` (RFC3339 string).
+    #[serde(default, alias = "updated_at")]
     pub last_message_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
     pub profile_id: Option<String>,
 }
 

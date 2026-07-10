@@ -46,9 +46,41 @@ impl WsTransport {
 pub fn spawn(
     cfg: TransportConfig,
 ) -> (mpsc::Sender<OutboundCommand>, mpsc::Receiver<TransportEvent>) {
+    spawn_with_waker(cfg, None)
+}
+
+/// Like [`spawn`], but invokes `waker` after every event is queued so a
+/// UI-thread consumer that only drains on UI events can be woken (e.g.
+/// makepad's `SignalToUI::set_ui_signal`). Without it, an RPC reply that
+/// lands while the app is idle (no touches, no animation) sits in the
+/// channel until the next unrelated event — observed as session-resume
+/// history not appearing until the screen was tapped.
+pub fn spawn_with_waker(
+    cfg: TransportConfig,
+    waker: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+) -> (mpsc::Sender<OutboundCommand>, mpsc::Receiver<TransportEvent>) {
     let (cmd_tx, cmd_rx) = mpsc::channel::<OutboundCommand>(CHANNEL_BUFFER);
     let (evt_tx, evt_rx) = mpsc::channel::<TransportEvent>(CHANNEL_BUFFER);
-    tokio::spawn(async move { run_state_machine(cfg, cmd_rx, evt_tx).await });
+    match waker {
+        None => {
+            tokio::spawn(async move { run_state_machine(cfg, cmd_rx, evt_tx).await });
+        }
+        Some(wake) => {
+            // Forwarder tap: the state machine emits into an inner channel;
+            // each event is re-queued for the consumer and then the waker
+            // fires. Keeps the state machine itself waker-free.
+            let (inner_tx, mut inner_rx) = mpsc::channel::<TransportEvent>(CHANNEL_BUFFER);
+            tokio::spawn(async move { run_state_machine(cfg, cmd_rx, inner_tx).await });
+            tokio::spawn(async move {
+                while let Some(evt) = inner_rx.recv().await {
+                    if evt_tx.send(evt).await.is_err() {
+                        break;
+                    }
+                    wake();
+                }
+            });
+        }
+    }
     (cmd_tx, evt_rx)
 }
 
@@ -64,6 +96,9 @@ enum PendingReply {
     TaskOutput(oneshot::Sender<Result<TaskOutputReadResult, RpcError>>),
     /// `session/list` — result re-emitted as `TransportEvent::SessionsListed`.
     SessionList,
+    /// `session/hydrate` — result re-emitted as
+    /// `TransportEvent::SessionHydrated` tagged with the session key.
+    SessionHydrate { session_id: String },
 }
 
 struct SharedState {
@@ -313,6 +348,13 @@ where
             }
             (methods::SESSION_OPEN, to_value(&params), Some(PendingReply::Lifecycle))
         }
+        OutboundCommand::OpenSessionFresh(params) => {
+            // Session switch: the tracked cursor belongs to the PREVIOUS
+            // session — don't bracket, and drop it so future replays track
+            // the session being opened instead.
+            shared.cursor = None;
+            (methods::SESSION_OPEN, to_value(&params), Some(PendingReply::Lifecycle))
+        }
         OutboundCommand::StartTurn(p) => (methods::TURN_START, to_value(&p), Some(PendingReply::Lifecycle)),
         OutboundCommand::InterruptTurn(p) => (methods::TURN_INTERRUPT, to_value(&p), Some(PendingReply::Lifecycle)),
         OutboundCommand::SendApprovalResponse { params, reply } => {
@@ -328,6 +370,15 @@ where
             methods::SESSION_LIST,
             to_value(&octos_core::ui_protocol::SessionListParams {}),
             Some(PendingReply::SessionList),
+        ),
+        OutboundCommand::HydrateSession { session_id } => (
+            methods::SESSION_HYDRATE,
+            to_value(&octos_core::ui_protocol::SessionHydrateParams {
+                session_id: octos_core::SessionKey(session_id.clone()),
+                after: None,
+                include: vec!["messages".to_owned()],
+            }),
+            Some(PendingReply::SessionHydrate { session_id }),
         ),
         OutboundCommand::Disconnect => return CommandOutcome::Disconnect,
     };
@@ -473,6 +524,15 @@ fn handle_response(
             }
             None
         }
+        PendingReply::SessionHydrate { session_id } => {
+            // Raw pass-through: the backend decodes `SessionHydrateResult`
+            // (it owns the chat-store routing; keeps the transport thin).
+            try_emit(
+                events,
+                TransportEvent::SessionHydrated { session_id, result: result_value },
+            );
+            None
+        }
     }
 }
 
@@ -491,6 +551,11 @@ fn fail_pending(pending: PendingRequest, err: RpcError) {
         // Sidebar hydrate is best-effort; the retry rides the next
         // `session/open` → `CapabilityNegotiated` → `ListSessions` cycle.
         PendingReply::SessionList => {}
+        // History hydrate is best-effort too — the user can re-tap the
+        // session row; the error already surfaced as a warn.
+        PendingReply::SessionHydrate { session_id } => {
+            log::warn!("ws: session/hydrate failed for {session_id}: {err:?}");
+        }
     }
 }
 
@@ -602,7 +667,7 @@ mod tests {
             req.headers()
                 .get("x-octos-ui-features")
                 .and_then(|v| v.to_str().ok()),
-            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, context.lifecycle.v1")
+            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, context.lifecycle.v1, state.session_hydrate.v1, auxiliary.rest_to_ws.v1")
         );
     }
 

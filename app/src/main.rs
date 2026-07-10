@@ -99,6 +99,31 @@ fn resolve_a2app_placeholders(text: &str, count: i64) -> String {
     out
 }
 
+/// While a reply is still streaming, hold back an UNCLOSED ```runsplash
+/// block: the downstream remend pass auto-closes open fences, which would
+/// dispatch every partial body to the Splash widget — a full script-VM eval
+/// per repaint (observed ~60 evals for one card) and a jittering half-built
+/// layout. Instead, cut the text at the open fence and show a small building
+/// note; the card renders exactly once when the closing fence arrives.
+fn defer_unclosed_runsplash(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let Some(start) = text.rfind("```runsplash") else {
+        return Cow::Borrowed(text);
+    };
+    let after = &text[start + "```runsplash".len()..];
+    let closed = match after.find('\n') {
+        // Fence body present — closed iff a terminating ``` follows.
+        Some(nl) => after[nl + 1..].contains("```"),
+        // Mid-fence-line — certainly not closed yet.
+        None => false,
+    };
+    if closed {
+        Cow::Borrowed(text)
+    } else {
+        Cow::Owned(format!("{}\u{1F6E0} Building app UI\u{2026}", &text[..start]))
+    }
+}
+
 /// Pull the body of the first ```runsplash fenced block out of a message so
 /// it can be fed straight to a `Splash` widget. Returns the raw Splash script
 /// (still containing any `{{state.*}}` placeholders).
@@ -806,33 +831,26 @@ script_mod! {
                     draw_text.text_style.font_size: 10
                 }
 
-                // Title + preview wrapped in a column. The trailing row_click
-                // button shrinks to fill remaining width so clicks on empty
-                // space still register; the explicit row_click receives the
-                // primary click. delete_button sits to its right.
+                // The row's click target doubles as its title: Buttons render
+                // only their OWN text (child Labels nested inside a Button
+                // are never drawn — Button::draw_walk paints bg/icon/text and
+                // stops), so `row_click.text` carries the session title,
+                // set from `SessionList::draw_walk`.
                 row_click := ButtonFlat {
                     width: Fill
                     height: Fit
                     align: Align{x: 0.0 y: 0.5}
-                    padding: 0
-                    flow: Down
+                    padding: Inset{left: 2 top: 4 right: 2 bottom: 4}
                     text: ""
-                    draw_text +: { color: #00000000 }
+                    draw_text +: {
+                        color: #xF3E3C7
+                        text_style +: { font_size: 12 }
+                    }
                     draw_bg +: {
                         color: #00000000
-                        color_hover: #00000000
+                        color_hover: #xEAD8B810
                         border_size: 0.0
-                        border_radius: 0.0
-                    }
-                    title := Label {
-                        text: ""
-                        draw_text.color: #xF3E3C7
-                        draw_text.text_style.font_size: 12
-                    }
-                    preview := Label {
-                        text: ""
-                        draw_text.color: #xCDBF9F88
-                        draw_text.text_style.font_size: 10
+                        border_radius: 6.0
                     }
                 }
 
@@ -2398,9 +2416,11 @@ impl Widget for ChatList {
                             // Remend keeps fenced blocks, tables and math
                             // self-consistent mid-stream so the Markdown
                             // widget doesn't re-layout a half-closed block
-                            // on every token.
+                            // on every token. An open `runsplash` fence is
+                            // deferred first — see `defer_unclosed_runsplash`.
+                            let deferred = defer_unclosed_runsplash(&data.streaming_text);
                             streaming_body = streaming_display_with_latex_autowrap_remend(
-                                &data.streaming_text,
+                                &deferred,
                                 opts,
                             );
                             &streaming_body
@@ -2506,6 +2526,14 @@ pub struct App {
     /// warnings). Empty when no toast is showing.
     #[rust]
     toast_timer: Timer,
+    /// ~10 Hz repaint driver while a turn streams. Deltas only accumulate
+    /// text + set `stream_dirty`; this interval turns them into redraws so a
+    /// fast token stream doesn't re-parse/redraw the thread per token.
+    #[rust]
+    stream_tick: Timer,
+    /// Set by delta handlers; cleared when the tick repaints.
+    #[rust]
+    stream_dirty: bool,
     /// "A2App" composer toggle: when on, the next message is wrapped with the
     /// Splash UI-generation prompt so the LLM returns a `runsplash` block that
     /// renders as live UI.
@@ -3911,6 +3939,41 @@ impl MatchEvent for App {
         // tasks plus the `SessionList` widget's own click events. See
         // `app/src/app/sessions.rs`.
         for action in actions {
+            // Session-resume history arrived (`session/hydrate` reply routed
+            // through the transport drain). Fill the chat thread if the user
+            // is still on that session.
+            if let Some(h) =
+                action.downcast_ref::<crate::backend::octos_ui::SessionResumeHydrated>()
+            {
+                if self.session_id == Some(h.session_id) {
+                    let count = {
+                        let mut data = CHAT_DATA.write().unwrap();
+                        data.messages = h
+                            .messages
+                            .iter()
+                            .filter_map(|(role, content)| {
+                                let role = match role.as_str() {
+                                    "user" => ChatRole::User,
+                                    "assistant" => ChatRole::Assistant,
+                                    // Tool/system rows aren't chat bubbles.
+                                    _ => return None,
+                                };
+                                Some(ChatMessage { role, text: content.clone() })
+                            })
+                            .collect();
+                        data.is_streaming = false;
+                        data.messages.len()
+                    };
+                    self.update_status(cx);
+                    self.update_empty_state_visibility(cx);
+                    let chat_list = self.ui.widget(cx, ids!(chat_list));
+                    let list = chat_list.portal_list(cx, ids!(list));
+                    list.set_tail_range(true);
+                    list.set_first_id_and_scroll(count.saturating_sub(1), 0.0);
+                    cx.redraw_all();
+                }
+                continue;
+            }
             let Some(sa) = action.downcast_ref::<SessionListAction>() else { continue };
             match sa {
                 SessionListAction::Hydrated(list) => {
@@ -3945,6 +4008,34 @@ impl MatchEvent for App {
                                 NavigationEvent::OpenSession(id.clone()),
                             ),
                         );
+                    }
+                    // Resume the server-side session and request its history
+                    // (`session/hydrate` → `SessionResumeHydrated` action).
+                    let resumed = self
+                        .agent
+                        .as_mut()
+                        .and_then(|agent| agent.resume_session(cx, &id.0));
+                    if let Some(sid) = resumed {
+                        self.session_id = Some(sid);
+                        self.current_prompt = None;
+                        {
+                            let mut data = CHAT_DATA.write().unwrap();
+                            data.messages.clear();
+                            data.streaming_text.clear();
+                            data.thinking_text.clear();
+                            data.is_streaming = false;
+                            data.a2app_count = 0;
+                        }
+                        // The resumed session may or may not carry the Splash
+                        // manual in its history — re-prime on next A2App use.
+                        self.splash_primed = false;
+                        self.ui
+                            .label(cx, ids!(status_label))
+                            .set_text(cx, "Loading session\u{2026}");
+                        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+                        self.update_empty_state_visibility(cx);
+                        self.collapse_sidebar_if_narrow(cx);
+                        cx.redraw_all();
                     }
                     self.show_screen_for_nav(cx);
                 }
@@ -4344,6 +4435,17 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Streaming repaint tick — see `stream_tick` field docs.
+        if self.stream_tick.is_event(event).is_some() {
+            if self.stream_dirty {
+                self.stream_dirty = false;
+                cx.redraw_all();
+            } else if !CHAT_DATA.read().map(|d| d.is_streaming).unwrap_or(false) {
+                // Turn finished and nothing pending — park the interval.
+                cx.stop_timer(self.stream_tick);
+                self.stream_tick = Timer::empty();
+            }
+        }
         // Toast auto-dismiss: pop the shown toast and advance to the next.
         if self.toast_timer.is_event(event).is_some() {
             self.toast_timer = Timer::empty();
@@ -4412,29 +4514,40 @@ impl AppMain for App {
                             .set_text(cx, &format!("Error: {}", error));
                     }
                     AgentEvent::TextDelta { text, .. } => {
-                        log!("aichat UI text delta chars={}", text.chars().count());
-                        let item_id = {
-                            let mut data = CHAT_DATA.write().unwrap();
-                            data.streaming_text.push_str(&text);
-                            data.messages.len()
-                        };
-                        let chat_list = self.ui.widget(cx, ids!(chat_list));
-                        let list = chat_list.portal_list(cx, ids!(list));
-                        if let Some((_, item)) = list.get_item(item_id) {
-                            item.widget(cx, ids!(splash_view)).redraw(cx);
-                        }
-                        cx.redraw_all();
-                    }
-                    AgentEvent::ThinkingDelta { text, .. } => {
-                        log!("aichat UI thinking delta chars={}", text.chars().count());
+                        // Perf: tokens arrive far faster than 60 fps, and the
+                        // draw path re-parses the whole accumulated reply —
+                        // so only accumulate here and let the ~10 Hz
+                        // `stream_tick` drive redraws (first delta of a burst
+                        // paints immediately).
                         {
                             let mut data = CHAT_DATA.write().unwrap();
-                            data.thinking_text.push_str(&text);
+                            data.streaming_text.push_str(&text);
                         }
-                        self.ui
-                            .label(cx, ids!(status_label))
-                            .set_text(cx, "Thinking...");
-                        cx.redraw_all();
+                        self.stream_dirty = true;
+                        if self.stream_tick.is_empty() {
+                            self.stream_tick = cx.start_interval(0.1);
+                            self.stream_dirty = false;
+                            cx.redraw_all();
+                        }
+                    }
+                    AgentEvent::ThinkingDelta { text, .. } => {
+                        let first = {
+                            let mut data = CHAT_DATA.write().unwrap();
+                            let first = data.thinking_text.is_empty();
+                            data.thinking_text.push_str(&text);
+                            first
+                        };
+                        if first {
+                            self.ui
+                                .label(cx, ids!(status_label))
+                                .set_text(cx, "Thinking...");
+                        }
+                        self.stream_dirty = true;
+                        if self.stream_tick.is_empty() {
+                            self.stream_tick = cx.start_interval(0.1);
+                            self.stream_dirty = false;
+                            cx.redraw_all();
+                        }
                     }
                     AgentEvent::TurnComplete { .. } => {
                         let mut data = CHAT_DATA.write().unwrap();

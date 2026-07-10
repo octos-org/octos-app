@@ -18,6 +18,13 @@ pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_SESSION_WORKSPACE_CWD_V1 as
 // see octos-core ui_protocol.rs:214 — gates live `context/normalization` +
 // `context/compaction` events (the server withholds them unless requested).
 pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_CONTEXT_LIFECYCLE_V1 as CONTEXT_LIFECYCLE_V1;
+// see octos-core ui_protocol.rs:117 — gates `session/hydrate` (chat-history
+// reload for session resume).
+pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_SESSION_HYDRATE_V1 as SESSION_HYDRATE_V1;
+// see octos-core ui_protocol.rs:195 — strict opt-in gate for the aux
+// REST-over-WS methods (`session/list`, `session/delete`, …). Without it the
+// server rejects `session/list` with method_not_supported.
+pub use octos_core::ui_protocol::UI_PROTOCOL_FEATURE_AUXILIARY_REST_TO_WS_V1 as AUXILIARY_REST_TO_WS_V1;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Capabilities {
@@ -28,6 +35,12 @@ pub struct Capabilities {
     /// `context/compaction`). Drives the context-usage chip and the
     /// compaction toast — the server only streams these when requested.
     pub context_lifecycle: bool,
+    /// `session/hydrate` — authoritative chat-history reload used when
+    /// resuming a session from the sidebar.
+    pub session_hydrate: bool,
+    /// Aux REST-over-WS methods (`session/list` etc.) — strict opt-in; the
+    /// sidebar session list stays empty without it.
+    pub auxiliary_rest_to_ws: bool,
     /// Everything the server advertised, including unknown features.
     #[serde(default)]
     pub raw: BTreeMap<String, Value>,
@@ -41,6 +54,8 @@ impl Capabilities {
             pane_snapshots: true,
             session_workspace_cwd: true,
             context_lifecycle: true,
+            session_hydrate: true,
+            auxiliary_rest_to_ws: true,
             raw: BTreeMap::new(),
         }
     }
@@ -59,6 +74,12 @@ impl Capabilities {
         }
         if self.context_lifecycle {
             features.push(CONTEXT_LIFECYCLE_V1.to_owned());
+        }
+        if self.session_hydrate {
+            features.push(SESSION_HYDRATE_V1.to_owned());
+        }
+        if self.auxiliary_rest_to_ws {
+            features.push(AUXILIARY_REST_TO_WS_V1.to_owned());
         }
         for (feature, enabled) in &self.raw {
             if enabled.as_bool() == Some(true) && !features.iter().any(|f| f == feature) {
@@ -93,6 +114,8 @@ impl Capabilities {
                 PANE_SNAPSHOTS_V1 => caps.pane_snapshots = true,
                 SESSION_WORKSPACE_CWD_V1 => caps.session_workspace_cwd = true,
                 CONTEXT_LIFECYCLE_V1 => caps.context_lifecycle = true,
+                SESSION_HYDRATE_V1 => caps.session_hydrate = true,
+                AUXILIARY_REST_TO_WS_V1 => caps.auxiliary_rest_to_ws = true,
                 _ => {}
             }
             caps.raw.insert(name.to_owned(), Value::Bool(true));
@@ -124,6 +147,8 @@ impl Capabilities {
                         PANE_SNAPSHOTS_V1 => out.pane_snapshots = true,
                         SESSION_WORKSPACE_CWD_V1 => out.session_workspace_cwd = true,
                         CONTEXT_LIFECYCLE_V1 => out.context_lifecycle = true,
+                        SESSION_HYDRATE_V1 => out.session_hydrate = true,
+                        AUXILIARY_REST_TO_WS_V1 => out.auxiliary_rest_to_ws = true,
                         _ => {}
                     }
                 }
@@ -179,7 +204,7 @@ mod tests {
         caps.raw.insert("future.v1".into(), Value::Bool(true));
         assert_eq!(
             caps.handshake_header_value().as_deref(),
-            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, context.lifecycle.v1, future.v1")
+            Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, context.lifecycle.v1, state.session_hydrate.v1, auxiliary.rest_to_ws.v1, future.v1")
         );
     }
 }

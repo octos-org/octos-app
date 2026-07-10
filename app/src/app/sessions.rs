@@ -227,12 +227,14 @@ impl Widget for SessionList {
                     let Some(row) = rows.get(item_id) else { continue };
                     let item_widget = list.item(cx, item_id, id!(SessionItem));
 
-                    item_widget.label(cx, ids!(title)).set_text(cx, &row.title);
-
-                    let preview_label = item_widget.label(cx, ids!(preview));
-                    let preview_text = row.preview.clone().unwrap_or_default();
-                    preview_label.set_text(cx, &preview_text);
-                    preview_label.set_visible(cx, !preview_text.is_empty());
+                    // The row's whole click target is `row_click` (a Button),
+                    // and Buttons render only their OWN text — child Labels
+                    // nested inside one are never drawn (Button::draw_walk
+                    // paints bg/icon/text and stops). So the title IS the
+                    // button's text; the preview line was dropped with it.
+                    item_widget
+                        .button(cx, ids!(row_click))
+                        .set_text(cx, &row.title);
 
                     let dot = item_widget.label(cx, ids!(streaming_dot));
                     dot.set_visible(cx, row.is_active);

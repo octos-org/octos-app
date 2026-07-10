@@ -34,6 +34,18 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::app::sessions::APP_STATE;
 
+/// Posted from the transport drain when a `session/hydrate` reply lands.
+/// `App::handle_actions` folds it into `CHAT_DATA` if `session_id` still
+/// matches the session the user resumed (guards against a stale reply after
+/// the user has already switched again).
+#[derive(Debug)]
+pub struct SessionResumeHydrated {
+    pub session_id: SessionId,
+    /// `(role, content)` rows in seq order, roles as the wire sends them
+    /// ("user" / "assistant" / other — the App filters).
+    pub messages: Vec<(String, String)>,
+}
+
 /// `Agent` implementation backed by the Octos UI Protocol over WebSocket.
 pub struct OctosUiAgent {
     /// Owned Tokio runtime — required because `ws::spawn` calls
@@ -93,7 +105,15 @@ impl OctosUiAgent {
             .expect("octos-ui-agent: tokio runtime build");
         let (cmd_tx, evt_rx) = {
             let _guard = runtime.enter();
-            ws::spawn(config)
+            // Wake the makepad UI thread whenever a transport event queues —
+            // otherwise replies that land while the app is idle (no touch,
+            // no animation) sit undrained until the next unrelated event.
+            ws::spawn_with_waker(
+                config,
+                Some(std::sync::Arc::new(|| {
+                    makepad_widgets::SignalToUI::set_ui_signal();
+                })),
+            )
         };
         Self {
             _runtime: runtime,
@@ -114,8 +134,24 @@ impl OctosUiAgent {
     /// Synthesise a fresh `SessionKey` from a Makepad `SessionId`. The
     /// LiveId-as-u64 → hex string round-trip is stable for the agent's
     /// lifetime; the server treats the value as an opaque identifier.
+    ///
+    /// The key embeds a per-process boot nonce: `SessionId`s are sequential
+    /// (1, 2, …) so without it every app launch would mint the same
+    /// "octos-app:…0001" key and silently re-attach to (and grow) the
+    /// previous launch's server session. Old sessions stay reachable via
+    /// `session/list` + `resume_session`.
     fn make_session_key(session_id: SessionId) -> SessionKey {
-        SessionKey(format!("octos-app:{:016x}", session_id.0.0))
+        static BOOT_NONCE: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        });
+        SessionKey(format!(
+            "octos-app:{:08x}-{:08x}",
+            *BOOT_NONCE,
+            session_id.0.0 as u32
+        ))
     }
 
     /// Best-effort post to the transport task. Logs (and drops) on a closed
@@ -225,6 +261,44 @@ impl OctosUiAgent {
                 let fallback =
                     octos_app_store::auth::ProfileId::from(self.fallback_profile.clone());
                 crate::app::sessions::hydrate_from_ws_value(sessions, &fallback);
+                Vec::new()
+            }
+            TransportEvent::SessionHydrated { session_id, result } => {
+                // Resume flow: decode the chat rows and hand them to the App
+                // via a posted action (same pattern as `SessionListAction`).
+                let key = SessionKey(session_id);
+                let Some(&sid) = self.session_ids.get(&key) else {
+                    log::warn!(
+                        "octos-ui-agent: session/hydrate reply for unmapped {}",
+                        key.0
+                    );
+                    return Vec::new();
+                };
+                match serde_json::from_value::<
+                    octos_core::ui_protocol::SessionHydrateResult,
+                >(result)
+                {
+                    Ok(r) => {
+                        let mut messages: Vec<(String, String)> = Vec::new();
+                        if let Some(rows) = r.messages {
+                            for row in rows {
+                                messages.push((row.role, row.content));
+                            }
+                        }
+                        log::info!(
+                            "octos-ui-agent: hydrated {} rows for {}",
+                            messages.len(),
+                            key.0
+                        );
+                        Cx::post_action(SessionResumeHydrated {
+                            session_id: sid,
+                            messages,
+                        });
+                    }
+                    Err(e) => {
+                        log::warn!("octos-ui-agent: decode session/hydrate: {e}")
+                    }
+                }
                 Vec::new()
             }
         }
@@ -445,6 +519,37 @@ impl Agent for OctosUiAgent {
             after: None,
         }));
         session_id
+    }
+
+    /// Re-attach to an existing server session (sidebar resume): map a fresh
+    /// local `SessionId` to the given key, re-open it (octos sessions are
+    /// stateful — `session/open` on an existing key attaches), then request
+    /// its chat history via `session/hydrate`. The history lands as a posted
+    /// `SessionResumeHydrated` action.
+    fn resume_session(&mut self, _cx: &mut Cx, backend_key: &str) -> Option<SessionId> {
+        let key = SessionKey(backend_key.to_owned());
+        // Re-use the existing mapping if the user re-taps the same session.
+        let session_id = if let Some(&sid) = self.session_ids.get(&key) {
+            sid
+        } else {
+            let sid = SessionId::new();
+            self.session_keys.insert(sid, key.clone());
+            self.session_ids.insert(key.clone(), sid);
+            sid
+        };
+        log::info!("octos-ui-agent: resume_session → {}", key.0);
+        // Fresh open (no cursor bracket): the connection cursor belongs to
+        // the session we're switching AWAY from.
+        self.post(OutboundCommand::OpenSessionFresh(SessionOpenParams {
+            session_id: key.clone(),
+            topic: None,
+            profile_id: None,
+            cwd: self.workspace_cwd.clone(),
+            sandbox: None,
+            after: None,
+        }));
+        self.post(OutboundCommand::HydrateSession { session_id: key.0 });
+        Some(session_id)
     }
 
     fn send_prompt(&mut self, _cx: &mut Cx, session_id: SessionId, text: &str) -> PromptId {
