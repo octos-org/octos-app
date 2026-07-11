@@ -52,14 +52,22 @@ Hard rules:\n\
 - `use mod.prelude.widgets.*` is auto-prepended; do NOT write imports.\n\
 - Do NOT wrap output in Root{{}} or Window{{}}; it is inserted into an \
 existing container.\n\
-- Make buttons interactive by notifying the host:\n\
-    Button{{ text: \"+1\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
-- Show live values with placeholders inside string literals:\n\
+- Interactivity + state: each card has its OWN independent state (keys you \
+choose). Read a value with `{{{{state.<key>}}}}` inside a string; change it \
+from a button. Events: `inc`/`dec`/`reset` adjust a NUMERIC key, `set` stores a \
+string. The payload names the key (default key is `count`):\n\
+    Button{{ text: \"+1\" on_click: || agent.notify(\"inc\", {{key: \"count\"}}) }}\n\
     Label{{ text: \"Count: {{{{state.count}}}}\" }}\n\
-- Internet images: fetch a remote picture with `http_resource` and show it in \
-an Image widget (downloads asynchronously, appears when ready):\n\
+    Button{{ text: \"Happy\" on_click: || agent.notify(\"set\", {{key: \"mood\", value: \"happy\"}}) }}\n\
+- Internet images: fetch a remote picture with `http_resource` in an Image \
+widget (downloads asynchronously, appears when ready). Use a real, \
+publicly-reachable HTTPS URL (png/jpg/webp/svg):\n\
     Image{{ src: http_resource(\"https://picsum.photos/400/240\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
-  Use a real, publicly-reachable HTTPS URL that returns png/jpg/webp/svg.\n\
+  For a REFRESHABLE image, bake the base URL literally and vary ONLY a \
+cache-buster query param bound to a counter, plus a button that increments it \
+— each tap loads a new picture (never put `{{{{state.*}}}}` as the WHOLE url):\n\
+    Image{{ src: http_resource(\"https://picsum.photos/400/240?sig={{{{state.count}}}}\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
+    Button{{ text: \"New Photo\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
 - CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
@@ -74,12 +82,27 @@ User request: {request}",
     )
 }
 
-/// Substitute every `{{state.<path>}}` token in a *raw* Splash script body with
-/// the live counter. MVP tracks one shared number, so every state key the LLM
-/// chose (count, score, value, total, …) renders the same `count`. Used for
-/// bodies already extracted from their fence and fed straight to a `Splash`
-/// widget; whole messages go through `resolve_a2app_placeholders` instead.
-fn substitute_state(text: &str, count: i64) -> String {
+/// Per-card A2App/Splash state: `{{state.<key>}}` key → value. Each rendered
+/// card owns one of these (keyed by message index in `CHAT_DATA.a2app_state`)
+/// so independent cards never share state.
+type CardState = std::collections::BTreeMap<String, String>;
+
+/// Tag every `agent.notify("<ev>"` / `agent.notify('<ev>'` in a Splash body with
+/// the owning card's id → `agent.notify("<item_id>:<ev>"`. The framework's
+/// `SplashAction::Notify` carries no source card, so this prefix is how a button
+/// press is routed back to the card that fired it (per-card state isolation).
+fn tag_notify_calls(body: &str, item_id: usize) -> String {
+    if !body.contains("agent.notify(") {
+        return body.to_string();
+    }
+    body.replace("agent.notify(\"", &format!("agent.notify(\"{item_id}:"))
+        .replace("agent.notify('", &format!("agent.notify('{item_id}:"))
+}
+
+/// Substitute `{{state.<key>}}` tokens with this card's live values. Missing
+/// keys render `"0"` (keeps counter cards reading 0 before any interaction, and
+/// is a safe default for a not-yet-set string).
+fn substitute_state_keys(text: &str, state: &CardState) -> String {
     if !text.contains("{{state.") {
         return text.to_string();
     }
@@ -89,8 +112,8 @@ fn substitute_state(text: &str, count: i64) -> String {
         out.push_str(&rest[..pos]);
         let after = &rest[pos + "{{state.".len()..];
         if let Some(end) = after.find("}}") {
-            let _key = &after[..end];
-            out.push_str(&count.to_string());
+            let key = after[..end].trim();
+            out.push_str(state.get(key).map(String::as_str).unwrap_or("0"));
             rest = &after[end + 2..];
         } else {
             out.push_str(&rest[pos..]);
@@ -101,14 +124,21 @@ fn substitute_state(text: &str, count: i64) -> String {
     out
 }
 
-/// Substitute `{{state.*}}` placeholders in a whole message, but ONLY inside
-/// ```runsplash fenced blocks (the generated live UI). Occurrences in ordinary
-/// prose or other code fences are left verbatim — they're the model's own text
-/// or documentation, not live state, and rewriting them to the counter value
-/// was a bug (`{{state.count}}` in an explanation became `0`). No-op for normal
-/// messages: no runsplash block ⇒ nothing to substitute.
-fn resolve_a2app_placeholders(text: &str, count: i64) -> String {
-    if !text.contains("```runsplash") || !text.contains("{{state.") {
+/// Prepare a *raw* Splash body for a specific card: substitute its state values
+/// AND tag its notify calls with the card id. Used for bodies already extracted
+/// from their fence (fed straight to a `Splash` widget); whole messages go
+/// through `resolve_a2app_card`.
+fn substitute_card_state(body: &str, item_id: usize, state: &CardState) -> String {
+    tag_notify_calls(&substitute_state_keys(body, state), item_id)
+}
+
+/// Whole-message variant: substitute `{{state.*}}` and tag notify calls ONLY
+/// inside ```runsplash fenced blocks (the generated live UI). Ordinary prose or
+/// other code fences are left verbatim — they're the model's own text, not live
+/// state, and rewriting them was a bug (`{{state.count}}` in an explanation
+/// became `0`). No-op for normal messages: no runsplash block ⇒ nothing to do.
+fn resolve_a2app_card(text: &str, item_id: usize, state: &CardState) -> String {
+    if !text.contains("```runsplash") {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len());
@@ -122,16 +152,16 @@ fn resolve_a2app_placeholders(text: &str, count: i64) -> String {
         };
         out.push_str(&rest[..line_end]);
         let body_and_rest = &rest[line_end..];
-        // Body runs to the closing fence; substitute only within it. The
-        // closing ``` is copied verbatim by the next iteration's prefix (or the
-        // trailing push below).
+        // Body runs to the closing fence; process only within it. The closing
+        // ``` is copied verbatim by the next iteration's prefix (or the trailing
+        // push below).
         match body_and_rest.find("```") {
             Some(close) => {
-                out.push_str(&substitute_state(&body_and_rest[..close], count));
+                out.push_str(&substitute_card_state(&body_and_rest[..close], item_id, state));
                 rest = &body_and_rest[close..];
             }
             None => {
-                out.push_str(&substitute_state(body_and_rest, count));
+                out.push_str(&substitute_card_state(body_and_rest, item_id, state));
                 return out;
             }
         }
@@ -200,9 +230,11 @@ fn app_splash_followup(request: &str) -> String {
         "Respond with EXACTLY ONE ```runsplash fenced block (Makepad Splash \
 syntax, no prose, no other fences), following the Splash manual already \
 provided earlier in this conversation. Same rules: no imports, no \
-Root/Window wrapper, buttons use `agent.notify(\"<action>\", {{}})`, live \
-values via `{{{{state.<key>}}}}` placeholders, internet images via \
-`Image{{ src: http_resource(\"https://…\") fit: ImageFit.Smallest }}`. CRITICAL: begin DIRECTLY with \
+Root/Window wrapper. Each card has its OWN state: read `{{{{state.<key>}}}}`; \
+change it with `agent.notify(\"inc\"/\"dec\"/\"reset\", {{key: \"count\"}})` for \
+numbers or `agent.notify(\"set\", {{key, value}})` for strings. Internet images: \
+`Image{{ src: http_resource(\"https://…\") fit: ImageFit.Smallest }}`; refreshable \
+= cache-buster `?sig={{{{state.count}}}}` + a button that does `inc`. CRITICAL: begin DIRECTLY with \
 a single root container widget (e.g. `RoundedView{{`) — NO top-level `let X = \
 …` component definitions (inline/repeat instead); a leading `let` fails to \
 render.\n\nUser request: {request}",
@@ -1954,7 +1986,7 @@ pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatD
     streaming_text: String::new(),
     thinking_text: String::new(),
     is_streaming: false,
-    a2app_count: 0,
+    a2app_state: std::collections::BTreeMap::new(),
 });
 
 // Slider position range (NOT alpha — alpha is derived per-layer).
@@ -2400,10 +2432,11 @@ pub struct ChatData {
     pub streaming_text: String,
     pub thinking_text: String,
     pub is_streaming: bool,
-    /// Live counter for rendered A2App/Splash UIs; substituted into
-    /// `{{state.count}}` at render time. Updated by inc/dec/reset button
-    /// actions in the App action handler.
-    pub a2app_count: i64,
+    /// Per-card A2App/Splash state: card (message index) → `CardState`. Each
+    /// rendered card owns an isolated map so independent cards never share
+    /// state; `{{state.<key>}}` substitutes that card's value. Mutated by
+    /// `agent.notify` events tagged with the card's id (see `tag_notify_calls`).
+    pub a2app_state: std::collections::BTreeMap<usize, CardState>,
 }
 
 impl ChatData {
@@ -2492,8 +2525,10 @@ impl Widget for ChatList {
                         // first tokens, so we'd otherwise render a growing
                         // code block for the whole stream.
                         let unwrapped_stream = unwrap_outer_markdown_fence(text);
+                        let empty_state = CardState::new();
+                        let card_state = data.a2app_state.get(&item_id).unwrap_or(&empty_state);
                         let resolved_stream =
-                            resolve_a2app_placeholders(unwrapped_stream, data.a2app_count);
+                            resolve_a2app_card(unwrapped_stream, item_id, card_state);
                         markdown.set_text(cx, &resolved_stream);
                         if just_started {
                             markdown.reset_all_streaming_animations();
@@ -2526,7 +2561,9 @@ impl Widget for ChatList {
                         // MathView can render them.
                         let unwrapped = unwrap_outer_markdown_fence(&msg.text);
                         let rendered = wrap_bare_latex(unwrapped);
-                        let rendered = resolve_a2app_placeholders(&rendered, data.a2app_count);
+                        let empty_state = CardState::new();
+                        let card_state = data.a2app_state.get(&item_id).unwrap_or(&empty_state);
+                        let rendered = resolve_a2app_card(&rendered, item_id, card_state);
                         markdown.set_text(cx, &rendered);
                         if is_animating {
                             markdown.stop_streaming_animation();
@@ -2942,7 +2979,7 @@ impl App {
             data.streaming_text.clear();
             data.thinking_text.clear();
             data.is_streaming = false;
-            data.a2app_count = 0;
+            data.a2app_state.clear();
             data.save_to_disk();
         }
         // New session — the Splash manual must be re-primed into it.
@@ -3105,35 +3142,36 @@ impl App {
     /// PortalList item's markdown (a plain redraw does NOT re-run the item's
     /// draw), so a live counter updates in place.
     fn refresh_a2app_templates(&self, cx: &mut Cx) {
-        let (messages, count) = {
+        let messages: Vec<(usize, String, CardState)> = {
             let data = CHAT_DATA.read().unwrap();
-            let msgs: Vec<(usize, String)> = data
-                .messages
+            data.messages
                 .iter()
                 .enumerate()
                 .filter_map(|(i, m)| match m.role {
-                    ChatRole::Assistant => Some((i, m.text.clone())),
+                    ChatRole::Assistant => Some((
+                        i,
+                        m.text.clone(),
+                        data.a2app_state.get(&i).cloned().unwrap_or_default(),
+                    )),
                     _ => None,
                 })
-                .collect();
-            (msgs, data.a2app_count)
+                .collect()
         };
         let chat_list = self.ui.widget(cx, ids!(chat_list));
         let list = chat_list.portal_list(cx, ids!(list));
-        for (item_id, text) in messages {
+        for (item_id, text, state) in messages {
             if let Some((_, item)) = list.get_item(item_id) {
                 // Re-feed the whole markdown (keeps non-splash content current).
                 let unwrapped = unwrap_outer_markdown_fence(&text);
                 let rendered = wrap_bare_latex(unwrapped);
-                let rendered = resolve_a2app_placeholders(&rendered, count);
+                let rendered = resolve_a2app_card(&rendered, item_id, &state);
                 item.markdown(cx, ids!(selectable)).set_text(cx, &rendered);
                 // Also push the resolved `runsplash` body straight to the
                 // Splash widget — its `set_text` re-evals on change, and this
                 // guarantees the update even if the markdown re-parse doesn't
                 // re-dispatch to the pooled splash_view.
                 if let Some(body) = extract_runsplash_body(&text) {
-                    // Raw body (no fence) → substitute unconditionally.
-                    let resolved = substitute_state(body, count);
+                    let resolved = substitute_card_state(body, item_id, &state);
                     item.widget(cx, ids!(splash_view)).set_text(cx, &resolved);
                 }
             }
@@ -3849,18 +3887,45 @@ impl MatchEvent for App {
             // live counter from common event names and redraw so the
             // `{{state.count}}` placeholder reflects the new value; also toast
             // the action so any event is visibly acknowledged.
-            if let makepad_widgets::SplashAction::Notify { event_id, .. } = action.cast() {
-                let ev = event_id.to_lowercase();
-                let mut changed = true;
-                if let Ok(mut data) = CHAT_DATA.write() {
-                    if ev.contains("inc") || ev.contains("plus") || ev.contains("add") {
-                        data.a2app_count += 1;
-                    } else if ev.contains("dec") || ev.contains("minus") || ev.contains("sub") {
-                        data.a2app_count -= 1;
-                    } else if ev.contains("reset") || ev.contains("clear") {
-                        data.a2app_count = 0;
-                    } else {
-                        changed = false;
+            if let makepad_widgets::SplashAction::Notify { event_id, payload } = action.cast() {
+                // event_id is tagged "<card_id>:<event>" (see `tag_notify_calls`)
+                // so the press routes to the card that fired it; `payload` is
+                // JSON, optionally {"key": "<name>", "value": "<string>"}.
+                let (card_id, ev) = match event_id.split_once(':') {
+                    Some((id, rest)) => (id.parse::<usize>().ok(), rest.to_lowercase()),
+                    None => (None, event_id.to_lowercase()),
+                };
+                let pj: serde_json::Value =
+                    serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+                let key = pj.get("key").and_then(|v| v.as_str()).unwrap_or("count").to_owned();
+                let value = pj.get("value").and_then(|v| v.as_str()).map(str::to_owned);
+                let mut changed = false;
+                if let Some(card_id) = card_id {
+                    if let Ok(mut data) = CHAT_DATA.write() {
+                        let card = data.a2app_state.entry(card_id).or_default();
+                        let cur = |c: &CardState| -> i64 {
+                            c.get(&key).and_then(|s| s.parse().ok()).unwrap_or(0)
+                        };
+                        changed = true;
+                        if ev.contains("inc") || ev.contains("plus") || ev.contains("add") {
+                            let n = cur(card);
+                            card.insert(key.clone(), (n + 1).to_string());
+                        } else if ev.contains("dec") || ev.contains("minus") || ev.contains("sub") {
+                            let n = cur(card);
+                            card.insert(key.clone(), (n - 1).to_string());
+                        } else if ev.contains("reset") || ev.contains("clear") {
+                            card.insert(key.clone(), "0".to_owned());
+                        } else if ev.starts_with("set") {
+                            // `set` last: "reset" also contains "set".
+                            match value {
+                                Some(v) => {
+                                    card.insert(key.clone(), v);
+                                }
+                                None => changed = false,
+                            }
+                        } else {
+                            changed = false;
+                        }
                     }
                 }
                 if changed {
@@ -4146,7 +4211,7 @@ impl MatchEvent for App {
                             data.streaming_text.clear();
                             data.thinking_text.clear();
                             data.is_streaming = false;
-                            data.a2app_count = 0;
+                            data.a2app_state.clear();
                         }
                         // The resumed session may or may not carry the Splash
                         // manual in its history — re-prime on next A2App use.
