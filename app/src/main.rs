@@ -74,8 +74,37 @@ containers, readable labels).\n\
 block MUST BEGIN DIRECTLY with a single root container widget — e.g. \
 `RoundedView{{` or `View{{`. Do NOT start with, or use, any top-level `let \
 X = …` component definitions. Inline/repeat any shared structure directly, \
-even if it makes the output longer. A leading `let` will fail to render.\n\n\
-Follow this Splash manual EXACTLY (except the `let`-override above):\n\n{manual}\n\n\
+even if it makes the output longer. A leading `let` will fail to render.\n\
+- NO custom shaders/MPSL: never write `pixel: fn`, `fn(`, `let`, `mut`, `Sdf2d`, \
+`uniform(`, `instance(`, or `.mix(` inside `draw_bg` — they crash the WHOLE card \
+into ugly raw source. WIDGET-PROPERTY RULES (setting a property a widget does not \
+have ALSO crashes the card): a ROUNDED card is \
+`RoundedView{{ draw_bg.color: #hex draw_bg.border_radius: 20.0 }}` (solid fill, \
+supports border_radius). A GRADIENT is \
+`GradientYView{{ draw_bg.color: #topHex draw_bg.color_2: #botHex }}` (vertical; \
+`GradientXView` = horizontal) — it is a full-width RECTANGLE and has NO \
+border_radius, so NEVER put `border_radius` on a Gradient*View. Pick one per \
+container; don't mix. Style ONLY with: draw_bg.color, draw_bg.color_2 \
+(gradient views only), draw_bg.border_radius (rounded views only), \
+draw_text.color, draw_text.text_style.font_size.\n\
+- iOS REFINEMENT (make it look like a real iOS app): prefer \
+`RoundedShadowView{{ draw_bg.color: #hex draw_bg.border_radius: 24.0 draw_bg.shadow_color: #00000055 draw_bg.shadow_offset: vec2(0.0, 8.0) draw_bg.shadow_radius: 24.0 margin: 14 }}` \
+as the CARD container — rounded corners + a soft iOS drop shadow (it DOES support \
+border_radius; keep a `margin` so the shadow has room). WRAP long text: any \
+headline/sentence Label MUST set `width: Fill` so it wraps to multiple lines instead \
+of clipping. Size hierarchy via font_size: hero value 52-72, title 16-18, row 15, \
+caption 12-13; make secondary text translucent `draw_text.color: #ffffff99` (or \
+`#8e8e93` on light cards). Hairline row dividers: \
+`SolidView{{ width: Fill height: 1 draw_bg.color: #ffffff14 }}`. iOS system colors: \
+blue #0a84ff, red #ff453a, green #32d74b, dark card #1c1c1e, light card #f2f2f7. \
+Generous, consistent padding (18-24) and spacing (10-14).\n\
+- LIVE DATA: you may fetch real data with a web tool, but it reliably returns only \
+SIMPLE single-endpoint sources — e.g. weather `https://wttr.in/<City>?format=j1`. \
+Multi-request or big-JSON APIs (stock quotes, news lists) usually FAIL; if the user did \
+not supply those numbers, ask for them — never invent live prices or headlines.\n\
+- ITERATE: if the user asks to refine a card you built earlier in this chat, reuse its \
+structure and change only what they asked; still exactly one runsplash block.\n\n\
+Follow this Splash manual EXACTLY (except the overrides above):\n\n{manual}\n\n\
 User request: {request}",
         manual = SPLASH_MANUAL,
         request = request,
@@ -97,6 +126,36 @@ fn tag_notify_calls(body: &str, item_id: usize) -> String {
     }
     body.replace("agent.notify(\"", &format!("agent.notify(\"{item_id}:"))
         .replace("agent.notify('", &format!("agent.notify('{item_id}:"))
+}
+
+/// Rewrite a bare `View{` — the transparent layout container LLMs reach for —
+/// into `SolidView{show_bg: false `. A bare `View{` crashes the Splash eval,
+/// which dumps the WHOLE card as raw source instead of UI; a `SolidView` with
+/// its background disabled is an equivalent invisible layout container that
+/// renders. Only rewrites `View{` NOT preceded by an ASCII letter, so
+/// `RoundedView{`, `SolidView{`, `GradientYView{`, `ScrollXView{`, … stay intact.
+fn neutralize_bare_view(body: &str) -> String {
+    if !body.contains("View{") {
+        return body.to_string();
+    }
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len() + 32);
+    let mut last = 0;
+    let mut search = 0;
+    while let Some(rel) = body[search..].find("View{") {
+        let pos = search + rel;
+        if pos > 0 && bytes[pos - 1].is_ascii_alphabetic() {
+            // part of a longer widget name (RoundedView, SolidView, …) — skip
+            search = pos + "View{".len();
+            continue;
+        }
+        out.push_str(&body[last..pos]);
+        out.push_str("SolidView{show_bg: false ");
+        last = pos + "View{".len();
+        search = last;
+    }
+    out.push_str(&body[last..]);
+    out
 }
 
 /// Substitute `{{state.<key>}}` tokens with this card's live values. Missing
@@ -129,7 +188,9 @@ fn substitute_state_keys(text: &str, state: &CardState) -> String {
 /// from their fence (fed straight to a `Splash` widget); whole messages go
 /// through `resolve_a2app_card`.
 fn substitute_card_state(body: &str, item_id: usize, state: &CardState) -> String {
-    tag_notify_calls(&substitute_state_keys(body, state), item_id)
+    let subst = substitute_state_keys(body, state);
+    let safe = neutralize_bare_view(&subst);
+    tag_notify_calls(&safe, item_id)
 }
 
 /// Whole-message variant: substitute `{{state.*}}` and tag notify calls ONLY
@@ -205,21 +266,6 @@ fn extract_runsplash_body(text: &str) -> Option<&str> {
     let body = &after[body_start..];
     let end = body.find("```")?;
     Some(body[..end].trim_end())
-}
-
-/// Render an in-progress reasoning/thinking stream as a dimmed markdown
-/// blockquote, shown above the (not-yet-started) answer so thinking-capable
-/// models' live thoughts are visible instead of a bare "Thinking…" placeholder.
-/// Ephemeral — replaced by the answer once its first token lands.
-fn as_thinking_blockquote(thinking: &str) -> String {
-    let mut out = String::with_capacity(thinking.len() + 32);
-    out.push_str("> \u{1F4AD} *Thinking\u{2026}*\n>\n");
-    for line in thinking.lines() {
-        out.push_str("> ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
 }
 
 /// Short A2App directive for follow-up requests in a session that already has
@@ -1781,28 +1827,28 @@ script_mod! {
                                 height: Fit
                                 new_batch: true
                                 flow: Down
-                                margin: Inset{left: 10 right: 10}
-                                padding: Inset{left: 14 top: 8 right: 10 bottom: 8}
-                                spacing: 6
+                                margin: Inset{left: 12 right: 12}
+                                padding: Inset{left: 14 top: 5 right: 12 bottom: 5}
+                                spacing: 2
                                 draw_bg +: {
                                     tint_color: #x0B4035
-                                    tint_alpha: 0.76
+                                    tint_alpha: 0.72
                                     border_color: ai_cyan
-                                    border_alpha: 0.54
-                                    border_width: 1.2
-                                    corner_radius: 12.0
+                                    border_alpha: 0.42
+                                    border_width: 1.0
+                                    corner_radius: 11.0
                                     halo_color: ai_cyan
-                                    halo_strength: 0.10
-                                    halo_radius: 4.0
-                                    highlight_strength: 0.34
-                                    highlight_band_height: 48.0
+                                    halo_strength: 0.05
+                                    halo_radius: 3.0
+                                    highlight_strength: 0.24
+                                    highlight_band_height: 28.0
                                     chroma_strength: 0.0
-                                    noise_strength: 0.004
+                                    noise_strength: 0.003
                                 }
 
                                 input := TextInput {
                                     width: Fill
-                                    height: 38
+                                    height: 32
                                     // Soft keyboards: show a Send action key
                                     // (ImeAction::Send submits via the same
                                     // path as the ↑ button). Without this the
@@ -1843,7 +1889,7 @@ script_mod! {
                                     align: Align{y: 0.5}
                                     spacing: 6
 
-                                    attach_button := IconButton { text: "+" }
+                                    attach_button := IconButton { text: "+" width: 30 height: 30 }
 
                                     // @ mention, ⌘ tools and 默认权限 stubs
                                     // dropped: all are M1 placeholders and
@@ -1875,8 +1921,8 @@ script_mod! {
 
                                     cancel_button := ButtonFlat {
                                         text: "Cancel"
-                                        width: 72
-                                        height: 32
+                                        width: 64
+                                        height: 30
                                         visible: false
                                         draw_text +: {
                                             color: #xF2F4F8
@@ -1893,19 +1939,21 @@ script_mod! {
 
                                     clear_button := PillButton {
                                         text: "Clear"
-                                        width: 56
-                                        height: 36
+                                        width: 50
+                                        height: 30
                                         draw_bg +: {
                                             color: #x08251EC8
                                             color_hover: #x123B31EE
                                             border_color: #xEAD8B83A
                                             border_size: 1.0
-                                            border_radius: 10.0
+                                            border_radius: 9.0
                                         }
                                     }
 
                                     send_button := SendButton {
                                         text: "↑"
+                                        width: 30
+                                        height: 30
                                     }
                                 }
                             }
@@ -2492,16 +2540,12 @@ impl Widget for ChatList {
                             .button(cx, ids!(share_button))
                             .set_visible(cx, false);
                         let streaming_body;
-                        let thinking_body;
+                        // Reasoning/thinking is intentionally NOT surfaced in the
+                        // chat bubble (user preference) — the swimming-octopus
+                        // indicator conveys "working". Show only a minimal
+                        // placeholder until the answer's first token arrives.
                         let text: &str = if data.streaming_text.is_empty() {
-                            if data.thinking_text.is_empty() {
-                                "..."
-                            } else {
-                                // Show the live reasoning stream (dimmed
-                                // blockquote) until the answer's first token.
-                                thinking_body = as_thinking_blockquote(&data.thinking_text);
-                                &thinking_body
-                            }
+                            "…"
                         } else {
                             let opts = SanitizeOptions {
                                 trim_unclosed_fence: false,
