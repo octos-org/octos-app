@@ -56,6 +56,10 @@ existing container.\n\
     Button{{ text: \"+1\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
 - Show live values with placeholders inside string literals:\n\
     Label{{ text: \"Count: {{{{state.count}}}}\" }}\n\
+- Internet images: fetch a remote picture with `http_resource` and show it in \
+an Image widget (downloads asynchronously, appears when ready):\n\
+    Image{{ src: http_resource(\"https://picsum.photos/400/240\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
+  Use a real, publicly-reachable HTTPS URL that returns png/jpg/webp/svg.\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
 - CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
@@ -197,7 +201,8 @@ fn app_splash_followup(request: &str) -> String {
 syntax, no prose, no other fences), following the Splash manual already \
 provided earlier in this conversation. Same rules: no imports, no \
 Root/Window wrapper, buttons use `agent.notify(\"<action>\", {{}})`, live \
-values via `{{{{state.<key>}}}}` placeholders. CRITICAL: begin DIRECTLY with \
+values via `{{{{state.<key>}}}}` placeholders, internet images via \
+`Image{{ src: http_resource(\"https://…\") fit: ImageFit.Smallest }}`. CRITICAL: begin DIRECTLY with \
 a single root container widget (e.g. `RoundedView{{`) — NO top-level `let X = \
 …` component definitions (inline/repeat instead); a leading `let` fails to \
 render.\n\nUser request: {request}",

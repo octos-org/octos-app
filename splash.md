@@ -691,9 +691,12 @@ DropDownFlat{ labels: ["Small" "Medium" "Large"] }
 ## Media
 
 ### Image
-Properties: `draw_bg` (DrawImage), `fit` (ImageFit), `min_width`, `min_height`, `width_scale`, `animation` (ImageAnimation)
+Properties: `src` (resource handle), `draw_bg` (DrawImage), `fit` (ImageFit), `min_width`, `min_height`, `width_scale`, `animation` (ImageAnimation)
 ```
 Image{ width: 200 height: 150 fit: ImageFit.Stretch }
+// Remote/internet image — load from an HTTPS URL (downloads async, appears when ready):
+Image{ src: http_resource("https://picsum.photos/400/240") fit: ImageFit.Smallest width: Fill height: 180 }
+// Local bundled image: Image{ src: crate_resource("self://resources/pic.png") }
 // ImageFit: Stretch | Horizontal | Vertical | Smallest | Biggest | Size
 // ImageAnimation: Stop | Once | Loop | Bounce | OnceFps(60) | LoopFps(25) | BounceFps(25)
 ```
