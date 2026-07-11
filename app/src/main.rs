@@ -77,7 +77,7 @@ weather, places, travel): a REAL photo of the place FILLS the whole screen (9:16
 with the text overlaid at the bottom over a dark gradient. Use this EXACT structure — \
 an Overlay of image, then dark scrim, then text pinned to the bottom:\n\
     View{{ width: Fill height: 700 flow: Overlay\n\
-        Image{{ src: http_resource(\"https://loremflickr.com/1080/1920/tokyo,skyline,cityscape\") fit: ImageFit.CropToFill width: Fill height: Fill }}\n\
+        Image{{ src: http_resource(sys.photo(\"tokyo skyline cityscape\")) fit: ImageFit.CropToFill width: Fill height: Fill }}\n\
         GradientYView{{ width: Fill height: Fill draw_bg.color: #00000000 draw_bg.color_2: #000000E6 }}\n\
         View{{ width: Fill height: Fill flow: Down align: {{x: 0.0 y: 1.0}} padding: Inset{{left: 28 right: 28 bottom: 64}}\n\
             Label{{ text: \"Tokyo\" draw_text.color: #ffffff draw_text.text_style.font_size: 26 }}\n\
@@ -86,12 +86,14 @@ an Overlay of image, then dark scrim, then text pinned to the bottom:\n\
             Label{{ text: \"H:78°  L:64°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 16 }}\n\
         }}\n\
     }}\n\
-  REAL IMAGE: `https://loremflickr.com/1080/1920/<city>,skyline,cityscape` returns a \
-real Flickr photo of that place (comma-separated keywords, url-encoded). Add \
-`?lock=<n>` to lock one stable image (e.g. `.../1080/1920/paris,eiffel?lock=7`). The \
-GradientYView is a dark scrim (transparent top -> dark bottom) so the WHITE text \
-stays readable over ANY photo. Keep `height: 700` (fills the whole screen), and put \
-ALL text in the BOTTOM overlay (align y: 1.0). The hero temperature keeps its margin.\n\
+  REAL IMAGE — call the built-in `sys.photo(\"<place + scene keywords>\")` inside \
+`http_resource(...)`: it returns a real full-screen (9:16) photo URL for that \
+subject, e.g. `http_resource(sys.photo(\"kyoto temple autumn\"))` or \
+`http_resource(sys.photo(\"london rainy street\"))`. Pass the CITY plus a couple of \
+scene/weather words. The GradientYView is a dark scrim (transparent top -> dark \
+bottom) so the WHITE text stays readable over ANY photo. Keep `height: 700` (fills \
+the whole screen), and put ALL text in the BOTTOM overlay (align y: 1.0). The hero \
+temperature keeps its margin.\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
 - CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
