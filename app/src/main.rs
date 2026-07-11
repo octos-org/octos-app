@@ -78,16 +78,16 @@ translucent 7-DAY FORECAST panel sits at the bottom — like the real iOS Weathe
 Reproduce this EXACT structure (a full-screen Overlay: photo, dark scrim, then a Down \
 column = current block, a Filler, then the forecast panel), substituting real data:\n\
     SolidView{{ width: Fill height: 700 flow: Overlay new_batch: true draw_bg.color: #000000\n\
-        Image{{ src: http_resource(sys.photo(\"tokyo skyline clear sky\")) fit: ImageFit.Stretch width: Fill height: Fill draw_bg.color: #000000 }}\n\
-        GradientYView{{ width: Fill height: Fill draw_bg.color: #00000022 draw_bg.color_2: #000000DD }}\n\
+        Image{{ src: http_resource(sys.photo(\"tokyo skyline clear sky\")) fit: ImageFit.Biggest width: Fill height: Fill }}\n\
+        GradientYView{{ width: Fill height: Fill new_batch: true draw_bg.color: #00000022 draw_bg.color_2: #000000DD }}\n\
         View{{ width: Fill height: Fill flow: Down padding: Inset{{left: 26 top: 34 right: 26 bottom: 14}}\n\
             Label{{ text: \"Tokyo\" draw_text.color: #ffffff draw_text.text_style.font_size: 26 }}\n\
             Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 56 margin: Inset{{top: 0 bottom: 0}} }}\n\
             Label{{ text: \"☀️  Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 18 }}\n\
             Label{{ text: \"H:78°   L:64°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 15 }}\n\
             Filler{{}}\n\
-            RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 padding: Inset{{left: 16 top: 8 right: 16 bottom: 8}} draw_bg.color: #00000055 draw_bg.border_radius: 22.0\n\
-                SolidView{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} padding: Inset{{top: 5 bottom: 5}} draw_bg.color: #00000000\n\
+            RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 new_batch: true padding: Inset{{left: 16 top: 8 right: 16 bottom: 8}} draw_bg.color: #00000055 draw_bg.border_radius: 22.0\n\
+                SolidView{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 5 bottom: 5}} draw_bg.color: #00000000\n\
                     Label{{ width: 100 text: \"Today\" draw_text.color: #ffffff draw_text.text_style.font_size: 16 }}\n\
                     Label{{ width: 44 text: \"☀️\" draw_text.text_style.font_size: 20 }}\n\
                     Filler{{}}\n\
@@ -99,8 +99,12 @@ with its own weather emoji and lo/hi. 7 rows total.\n\
             }}\n\
         }}\n\
     }}\n\
-  RULES: current block (city, big temp, `emoji + condition`, H/L) is at the TOP (top \
-padding 74 keeps it off the status bar). `Filler{{}}` pushes the forecast to the \
+  RULES: the ROOT Overlay container and the Image MUST have NO `padding` and NO \
+`margin` — an Overlay child's Fill height = parent height MINUS parent padding MINUS \
+its own margin, so ANY inset there SHRINKS the photo and exposes bare background. Put \
+ALL insets (the top: 34 status-bar clearance, side and bottom padding) ONLY on the \
+inner `flow: Down` text column, exactly as in the template. Current block (city, big \
+temp, `emoji + condition`, H/L) at the TOP; `Filler{{}}` pushes the forecast to the \
 BOTTOM. The forecast is a translucent RoundedView with ONE SolidView row per day: day \
 name (left), a weather EMOJI (☀️ sunny, ⛅ partly, ☁️ cloudy, 🌧️ rain, ⛈️ storm, \
 ❄️ snow), then a Filler, then lo° (dim) and hi° (white) on the right. Give 7 rows. \
@@ -194,7 +198,7 @@ fn neutralize_bare_view(body: &str) -> String {
         // regardless of draw_bg.color (seen as red bands where a card didn't
         // opaquely cover). RoundedView honours draw_bg.color, so a transparent
         // fill makes the substitute invisible.
-        out.push_str("RoundedView{draw_bg.color: #00000000 draw_bg.border_radius: 0.0 ");
+        out.push_str("RoundedView{new_batch: true draw_bg.color: #00000000 draw_bg.border_radius: 0.0 ");
         last = pos + "View{".len();
         search = last;
     }
@@ -919,10 +923,13 @@ script_mod! {
                             new_batch: true
                             width: Fill
                             height: Fit
-                            // Transparent — a SolidView with no color paints the
-                            // uninitialized default (red), which showed through
-                            // the card's translucent scrim as red bands.
-                            draw_bg.color: #00000000
+                            // OPAQUE BLACK: this view renders into a new_batch
+                            // offscreen texture; any pixel the card leaves
+                            // unpainted (e.g. an Image letterbox) otherwise
+                            // composites uninitialized GPU memory — bright red
+                            // bands on this device. A black backing guarantees
+                            // clean letterboxing.
+                            draw_bg.color: #000000FF
                             splash_view := Splash {
                                 flow: Overlay
                                 width: Fill
@@ -1399,7 +1406,11 @@ script_mod! {
         ui: Root{
             main_window := Window{
                 show_caption_bar: false
-                pass.clear_color: #00000000
+                // Opaque black, NOT transparent: with a transparent clear, any
+                // pixel no opaque widget covers shows the uninitialized Android
+                // surface, which reads as BRIGHT RED on this device — seen as
+                // red bands wherever a generated card didn't fully cover.
+                pass.clear_color: #000000FF
                 window.transparent: true
                 // window.backdrop: WindowBackdrop.Blur — disabled until
                 // platform bug fixed in macos_window.rs:532 (addSubview
@@ -4747,6 +4758,11 @@ impl MatchEvent for App {
         self.splash_mode = true;
         self.composer_shown = true;
 
+        // DEBUG: enable the fork's image decode tracing (decode_start/done,
+        // gpu_commit) — diagnosing the first-image-of-a-fresh-process black
+        // photo. Must be set before the first decode (OnceLock).
+        std::env::set_var("MAKEPAD_GLTF_TEX_DEBUG", "1");
+
         // Android: the process has no usable HOME, and everything below
         // (server.json, the token store, chat persistence) is HOME-relative.
         // Point HOME at the app-private files dir makepad reports from
@@ -4862,6 +4878,26 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Central drain for async image decodes: guarantee every decoded image
+        // buffer lands in the global ImageCache even when NO Image widget
+        // catches the one-shot AsyncImageLoad action (a Splash card evals twice
+        // — streaming then pooled — and the instance that spawned the decode
+        // may be gone when the result posts; the first image of a fresh process
+        // also pays decode-pool cold-start, widening that window). Widgets then
+        // adopt the texture from the cache via the draw_walk self-heal. Taking
+        // the result here is safe: any widget that sees the action afterwards
+        // finds it already taken (no-op) and loads from the cache instead.
+        if let Event::Actions(actions) = event {
+            use makepad_widgets::makepad_draw::{process_async_image_load, AsyncImageLoad};
+            for action in actions {
+                if let Some(AsyncImageLoad { image_path, result }) = action.downcast_ref() {
+                    if let Some(result) = result.borrow_mut().take() {
+                        process_async_image_load(cx, image_path, result);
+                        cx.redraw_all();
+                    }
+                }
+            }
+        }
         // Streaming repaint tick — see `stream_tick` field docs.
         if self.stream_tick.is_event(event).is_some() {
             if self.stream_dirty {
@@ -5002,6 +5038,10 @@ impl AppMain for App {
                                 // retrieved by name and refined over time.
                                 if let Some(body) = extract_runsplash_body(&text) {
                                     rendered_card = true;
+                                    // DEBUG: dump the generated DSL in chunks.
+                                    for (i, chunk) in body.as_bytes().chunks(600).enumerate() {
+                                        log::info!("CARDDSL[{i}]{}", String::from_utf8_lossy(chunk));
+                                    }
                                     match extract_card_name(body) {
                                         Some(name) => save_a2app_card(&name, body),
                                         None => log::warn!(
