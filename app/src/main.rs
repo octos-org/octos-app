@@ -72,6 +72,13 @@ cache-buster query param bound to a counter, plus a button that increments it \
 — each tap loads a new picture (never put `{{{{state.*}}}}` as the WHOLE url):\n\
     Image{{ src: http_resource(\"https://picsum.photos/400/240?sig={{{{state.count}}}}\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
     Button{{ text: \"New Photo\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
+- HERO PHOTO for place / weather / travel cards: a full-width banner across the \
+TOP makes a card feel like a real iOS app. Use a genuine \
+`images.unsplash.com/photo-<id>` URL of that subject and `ImageFit.CropToFill` \
+so the photo COVERS the banner (fills width, crops overflow, no distortion):\n\
+    Image{{ src: http_resource(\"https://images.unsplash.com/photo-1502602898657-3e91760cbb34?w=640&q=70\") fit: ImageFit.CropToFill width: Fill height: 150 }}\n\
+  (that example URL is Paris / the Eiffel Tower — pick a URL matching the place). \
+Put the title + temperature BELOW the banner.\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
 - CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
@@ -96,7 +103,9 @@ draw_text.color, draw_text.text_style.font_size.\n\
 as the CARD container — rounded corners + a soft iOS drop shadow (it DOES support \
 border_radius; keep a `margin` so the shadow has room). WRAP long text: any \
 headline/sentence Label MUST set `width: Fill` so it wraps to multiple lines instead \
-of clipping. Size hierarchy via font_size: hero value 52-72, title 16-18, row 15, \
+of clipping. Size hierarchy via font_size: hero value 52-72 (a very large number like a \
+temperature MUST have `margin: Inset{{top: 10 bottom: 6}}` and its OWN line, or \
+its tall glyph tops get clipped by the label above it), title 16-18, row 15, \
 caption 12-13; make secondary text translucent `draw_text.color: #ffffff99` (or \
 `#8e8e93` on light cards). Hairline row dividers: \
 `SolidView{{ width: Fill height: 1 draw_bg.color: #ffffff14 }}`. iOS system colors: \
@@ -553,66 +562,21 @@ script_mod! {
         }
     }
 
-    let SendButton = ButtonFlat {
+    let SendButton = ButtonFlatIcon {
         width: 36
         height: 36
         padding: 0
-        draw_text +: {
-            color: ai_ink
-            text_style +: { font_size: 20 }
-        }
-        draw_bg +: {
-            hover: instance(0.0)
-            down: instance(0.0)
-            focus: instance(0.0)
-            disabled: instance(0.0)
+        icon_walk: Walk{ width: 20, height: 20 }
+        draw_icon +: {
             color: ai_gold
-            color_hover: #xFFD98B
-            border_color: #xFFF0D277
-            border_size: 1.0
-            border_radius: 10.0
-            pixel: fn() {
-                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let r = min(self.rect_size.x, self.rect_size.y) * 0.5 - 3.0
-                let center = self.rect_size * 0.5
-                let p = self.pos - vec2(0.5, 0.5)
-                let radial = clamp(length(p) * 2.0, 0.0, 1.0)
-                let top_highlight = clamp(1.0 - self.pos.y * 2.2, 0.0, 1.0)
-                let lower_shadow = smoothstep(0.35, 1.0, self.pos.y)
-                let paper_noise = (
-                    Math.random_2d(self.pos * self.rect_size * 0.42)
-                    + Math.random_2d(self.pos * self.rect_size * 1.3) * 0.35
-                    - 0.68
-                ) * 0.045
-                let fill = self.color
-                    .mix(self.color_focus, self.focus)
-                    .mix(self.color_hover, self.hover)
-                    .mix(self.color_down, self.down)
-                    .mix(self.color_disabled, self.disabled)
-                let glass_fill = vec4(
-                    fill.rgb
-                        + vec3(0.20, 0.13, 0.04) * top_highlight
-                        - vec3(0.18, 0.11, 0.04) * lower_shadow
-                        - vec3(0.06, 0.04, 0.02) * radial
-                        + paper_noise,
-                    fill.a
-                )
-
-                sdf.circle(center.x + 0.8, center.y + 1.4, r + 1.5)
-                sdf.fill(#x3A241370)
-
-                sdf.circle(center.x, center.y, r + 1.8)
-                sdf.fill_keep(#xA86F35)
-                sdf.stroke(#xF6D99A88, 1.0)
-
-                sdf.circle(center.x, center.y, r)
-                sdf.fill_keep(glass_fill)
-                sdf.stroke(#xF9D58AAA, 1.2)
-
-                sdf.circle(center.x - r * 0.18, center.y - r * 0.24, r * 0.46)
-                sdf.stroke(#xFFF3CF48, 0.8)
-                return sdf.result
-            }
+            svg: crate_resource("self:resources/icons/send.svg")
+        }
+        // Flat icon button — no filled circle behind the send glyph.
+        draw_bg +: {
+            color: #00000000
+            color_hover: #xEAD8B814
+            border_size: 0.0
+            border_radius: 8.0
         }
     }
 
@@ -1428,7 +1392,7 @@ script_mod! {
                             border_color: ai_cyan
                             border_alpha: 0.38
                             border_width: 1.0
-                            corner_radius: 30.0
+                            corner_radius: 10.0
                             halo_color: ai_cyan
                             halo_strength: 0.0
                             halo_radius: 0.0
@@ -1664,10 +1628,10 @@ script_mod! {
                         height: Fill
                         new_batch: true
                         flow: Down
-                        // 34pt side padding (plus app_shell's 16) wasted a
-                        // quarter of a 384pt phone viewport; 14 keeps the
-                        // glass inset visible on desktop too.
-                        padding: Inset{left: 14 top: 18 right: 14 bottom: 22}
+                        // Minimal padding so the A2App card fills the screen
+                        // (full-screen splash app). Header/footer are hidden and
+                        // the user prompt echo is suppressed in the chat list.
+                        padding: Inset{left: 6 top: 6 right: 6 bottom: 6}
                         spacing: 12
                         draw_bg +: {
                             tint_color: #x0B3B31
@@ -1689,6 +1653,8 @@ script_mod! {
                             height: 40
                             flow: Right
                             align: Align{y: 0.5}
+                            // Minimalist full-screen A2App: no header chrome.
+                            visible: false
 
                             // Phone: the sidebar auto-collapses after nav
                             // clicks on narrow windows; this brings it back.
@@ -1838,7 +1804,13 @@ script_mod! {
                         chat_screen := View {
                             width: Fill
                             height: Fill
-                            flow: Down
+                            // Overlay so the composer floats ON TOP of the
+                            // full-screen card. The composer is bottom-anchored
+                            // with a Filler (layout), NOT align — align made the
+                            // input's hit-area register at the top while drawing
+                            // at the bottom, so taps missed it. Its transparent
+                            // upper region passes touches through to the card.
+                            flow: Overlay
                             spacing: 12
 
                         chat_shell := View {
@@ -1875,48 +1847,85 @@ script_mod! {
                         // approvals are pending it pins above the composer.
                         approvals_pane := ApprovalsPane {}
 
-                        // Swimming-octopus thinking indicator — visible only
-                        // while a turn is streaming (`is_streaming`).
-                        // Toast strip — one auto-dismissing pill for
-                        // compaction / memory-saved / warning messages
-                        // (App::sync_toasts drives it from APP_STATE.toasts).
-                        toast_row := View {
-                            width: Fill
-                            height: Fit
-                            visible: false
-                            align: Align{x: 0.5}
-                            toast_pill := RoundedView {
-                                width: Fit
-                                height: Fit
-                                margin: Inset{top: 2 bottom: 4}
-                                padding: Inset{left: 14 top: 8 right: 14 bottom: 8}
-                                show_bg: true
-                                draw_bg +: {
-                                    color: #x0C3A2FF2
-                                    radius: 10.0
-                                }
-                                toast_label := Label {
-                                    width: Fit
-                                    height: Fit
-                                    text: ""
-                                    draw_text.color: #xDCEAE0
-                                    draw_text.text_style.font_size: 11
-                                }
-                            }
-                        }
-
-                        octo_row := View {
-                            width: Fill
-                            height: Fit
-                            visible: false
-                            align: Align{x: 0.5}
-                            octo := OctoThinking {}
-                        }
+                        // toast_row + octo_row live inside composer_row (bottom
+                        // stack) so the thinking indicator and toasts sit just
+                        // above the floating composer — not at the top of the
+                        // Overlay flow.
 
                         composer_row := View {
                             width: Fill
-                            height: Fit
-                            align: Align{x: 0.5 y: 0.0}
+                            // Fill the overlay; a Filler pushes the composer to
+                            // the bottom via layout so its hit-area matches where
+                            // it draws (align-bottom broke input focus).
+                            height: Fill
+                            flow: Down
+                            align: Align{x: 0.5}
+
+                            // Transparent spacer that occupies everything above
+                            // the composer so touches on the card pass through.
+                            View { width: Fill height: Fill }
+
+                            // Toast strip — one auto-dismissing pill for
+                            // compaction / memory-saved / warning messages
+                            // (App::sync_toasts drives it from APP_STATE.toasts).
+                            toast_row := View {
+                                width: Fill
+                                height: Fit
+                                visible: false
+                                align: Align{x: 0.5}
+                                toast_pill := RoundedView {
+                                    width: Fit
+                                    height: Fit
+                                    margin: Inset{top: 2 bottom: 4}
+                                    padding: Inset{left: 14 top: 8 right: 14 bottom: 8}
+                                    show_bg: true
+                                    draw_bg +: {
+                                        color: #x0C3A2FF2
+                                        radius: 10.0
+                                    }
+                                    toast_label := Label {
+                                        width: Fit
+                                        height: Fit
+                                        text: ""
+                                        draw_text.color: #xDCEAE0
+                                        draw_text.text_style.font_size: 11
+                                    }
+                                }
+                            }
+
+                            // Swimming-octopus thinking indicator — visible only
+                            // while a turn is streaming (`is_streaming`); sits
+                            // directly above the composer.
+                            octo_row := View {
+                                width: Fill
+                                height: Fit
+                                visible: false
+                                align: Align{x: 0.5}
+                                octo := OctoThinking {}
+                            }
+
+                            // Collapsed state: a slim translucent pill that
+                            // reveals the composer again (it auto-hides after a
+                            // card renders). Only one of pill/composer is visible
+                            // at a time; they stack at the bottom of this flow.
+                            reveal_pill := PillButton {
+                                text: "+"
+                                width: 52
+                                height: 30
+                                visible: false
+                                margin: Inset{bottom: 12}
+                                draw_text +: {
+                                    color: ai_cream
+                                    text_style +: { font_size: 18 }
+                                }
+                                draw_bg +: {
+                                    color: #x0B4035B0
+                                    color_hover: #x123B31D0
+                                    border_color: #x72E4FF44
+                                    border_size: 1.0
+                                    border_radius: 15.0
+                                }
+                            }
 
                             composer := GlassPanel {
                                 // No min-width: a 620pt floor pushed the
@@ -1931,7 +1940,9 @@ script_mod! {
                                 spacing: 2
                                 draw_bg +: {
                                     tint_color: #x0B4035
-                                    tint_alpha: 0.72
+                                    // Floats over the card — keep it translucent
+                                    // (liquid glass) so the card shows through.
+                                    tint_alpha: 0.50
                                     border_color: ai_cyan
                                     border_alpha: 0.42
                                     border_width: 1.0
@@ -1995,26 +2006,9 @@ script_mod! {
                                     // the row must fit a 384pt phone
                                     // viewport.
 
-                                    thinking_toggle := ToggleFlat {
-                                        text: "Thinking"
-                                        active: false
-                                        draw_text +: {
-                                            color: ai_cream_dim
-                                            text_style +: { font_size: 11 }
-                                        }
-                                    }
-
-                                    // A2App mode: wrap the next message so the
-                                    // LLM returns a live `runsplash` UI block
-                                    // (Makepad Splash → rendered mini-app).
-                                    splash_toggle := ToggleFlat {
-                                        text: "A2App"
-                                        active: false
-                                        draw_text +: {
-                                            color: ai_cream_dim
-                                            text_style +: { font_size: 11 }
-                                        }
-                                    }
+                                    // Thinking + A2App toggles removed — this app
+                                    // is now an always-on A2App card generator
+                                    // (splash_mode is forced true at startup).
 
                                     View { width: Fill height: 1 }
 
@@ -2036,21 +2030,23 @@ script_mod! {
                                         }
                                     }
 
-                                    clear_button := PillButton {
-                                        text: "Clear"
-                                        width: 50
+                                    clear_button := ButtonFlatIcon {
+                                        width: 34
                                         height: 30
+                                        icon_walk: Walk{ width: 19, height: 19 }
+                                        draw_icon +: {
+                                            color: #xB6C6BE
+                                            svg: crate_resource("self:resources/icons/clear.svg")
+                                        }
                                         draw_bg +: {
-                                            color: #x08251EC8
-                                            color_hover: #x123B31EE
-                                            border_color: #xEAD8B83A
-                                            border_size: 1.0
-                                            border_radius: 9.0
+                                            color: #00000000
+                                            color_hover: #xEAD8B814
+                                            border_size: 0.0
+                                            border_radius: 8.0
                                         }
                                     }
 
                                     send_button := SendButton {
-                                        text: "↑"
                                         width: 30
                                         height: 30
                                     }
@@ -2088,6 +2084,8 @@ script_mod! {
                             margin: Inset{left: 12 right: 12 top: 0 bottom: 0}
                             draw_text.text_style.font_size: 10
                             draw_text.color: #xE2D2B9AA
+                            // Minimalist full-screen A2App: no footer chrome.
+                            visible: false
                         }
                     }
                     }
@@ -2683,22 +2681,34 @@ impl Widget for ChatList {
                     }
 
                     if let Some(msg) = data.messages.get(item_id) {
+                        // Full-screen splash app: don't echo the user's prompt —
+                        // only the generated card is shown. Collapse the user
+                        // item to zero height instead of rendering the bubble.
+                        if matches!(msg.role, ChatRole::User) {
+                            let item_widget = list.item(cx, item_id, id!(User));
+                            item_widget.set_visible(cx, false);
+                            item_widget.draw_all_unscoped(cx);
+                            continue;
+                        }
                         let is_animating = self.animating_msg == Some(item_id);
                         let template = match msg.role {
                             ChatRole::User => id!(User),
                             ChatRole::Assistant => id!(Assistant),
                         };
                         let item_widget = list.item(cx, item_id, template);
-                        // Completed message — ensure the copy/share icons are
-                        // shown (PortalList pools items; this one may have been
-                        // the hidden streaming item last frame). User messages
+                        // Completed message — show the copy/share icons (PortalList
+                        // pools items; this one may have been the hidden streaming
+                        // item last frame). But NOT on an A2App card: copy/share act
+                        // on the raw message text, which for a card is runsplash DSL,
+                        // so the affordance is meaningless — hide both. User messages
                         // have neither button, so these are no-ops there.
+                        let is_splash_card = msg.text.contains("```runsplash");
                         item_widget
                             .button(cx, ids!(copy_button))
-                            .set_visible(cx, true);
+                            .set_visible(cx, !is_splash_card);
                         item_widget
                             .button(cx, ids!(share_button))
-                            .set_visible(cx, true);
+                            .set_visible(cx, !is_splash_card);
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
                         // wrap_bare_latex wraps `\cmd{…}` with `$…$` so
                         // MathView can render them.
@@ -2786,6 +2796,11 @@ pub struct App {
     /// short instruction, avoiding re-sending it every turn. Reset on new chat.
     #[rust]
     splash_primed: bool,
+    /// Whether the floating composer is expanded. It auto-collapses to the
+    /// reveal pill after a card renders (full-screen viewing), and expands
+    /// again when the pill is tapped. Initialized true in `handle_startup`.
+    #[rust]
+    composer_shown: bool,
     /// Single OctosUiAgent instance — replaces aichat's `Box<dyn Agent>`
     /// dynamic dispatch over LLM backends. Lazily constructed on first use.
     #[rust]
@@ -3127,6 +3142,9 @@ impl App {
         }
         // New session — the Splash manual must be re-primed into it.
         self.splash_primed = false;
+        // Back to the compose state (no card on screen).
+        self.composer_shown = true;
+        self.sync_composer(cx);
 
         if let Some(agent) = &mut self.agent {
             let config = SessionConfig {
@@ -3250,6 +3268,18 @@ these, edit that card and return the FULL updated block KEEPING its exact \
             self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
             self.ui.redraw(cx);
         }
+    }
+
+    /// Reflect `composer_shown` into the floating composer + reveal pill: when
+    /// expanded the glass composer shows and the pill hides; when collapsed
+    /// (after a card renders) only the slim pill shows, giving the card the
+    /// full screen. A full redraw is required after flipping glass-composite
+    /// visibility or the old composite lingers (see [[octos-app-android]]).
+    fn sync_composer(&mut self, cx: &mut Cx) {
+        let show = self.composer_shown;
+        self.ui.widget(cx, ids!(composer)).set_visible(cx, show);
+        self.ui.button(cx, ids!(reveal_pill)).set_visible(cx, !show);
+        cx.redraw_all();
     }
 
     /// Status label content. W01 will rewrite this to show `Connected ·
@@ -4022,20 +4052,12 @@ impl MatchEvent for App {
         {
             self.apply_glass_opacity(cx, opacity);
         }
-        // "Thinking" toggle → per-turn reasoning-effort override on the agent
-        // (thinking-capable models: DeepSeek V4, OpenAI reasoning, Grok-4).
-        // Applied to every subsequent turn until toggled off; the live stream
-        // then surfaces reasoning deltas above the answer (see
-        // `OctosUiAgent::set_thinking` and `as_thinking_blockquote`).
-        if let Some(on) = self.ui.check_box(cx, ids!(thinking_toggle)).changed(actions) {
-            if let Some(agent) = &mut self.agent {
-                agent.set_thinking(on);
-            }
-        }
+        // Thinking + A2App toggles were removed (always-on A2App card app).
 
-        // Splash toggle drives `splash_mode` for the next message.
-        if let Some(active) = self.ui.check_box(cx, ids!(splash_toggle)).changed(actions) {
-            self.splash_mode = active;
+        // Reveal pill → expand the floating composer again after it auto-hid.
+        if self.ui.button(cx, ids!(reveal_pill)).clicked(actions) {
+            self.composer_shown = true;
+            self.sync_composer(cx);
         }
 
         // Markdown link click — dispatch through robius-open for cross-platform
@@ -4668,6 +4690,11 @@ impl MatchEvent for App {
         // logcat — without this their records are dropped silently.
         octos_app_transport::install_android_logger();
 
+        // This app is a full-screen A2App card generator: A2App mode is always
+        // on (the toggle was removed), and the floating composer starts expanded.
+        self.splash_mode = true;
+        self.composer_shown = true;
+
         // Android: the process has no usable HOME, and everything below
         // (server.json, the token store, chat persistence) is HOME-relative.
         // Point HOME at the app-private files dir makepad reports from
@@ -4905,11 +4932,13 @@ impl AppMain for App {
                             text.chars().count()
                         );
                         data.thinking_text.clear();
+                        let mut rendered_card = false;
                         if !text.is_empty() {
                             if assistant_message_is_safe_to_store(&text) {
                                 // Persist a named A2App card so it can be
                                 // retrieved by name and refined over time.
                                 if let Some(body) = extract_runsplash_body(&text) {
+                                    rendered_card = true;
                                     match extract_card_name(body) {
                                         Some(name) => save_a2app_card(&name, body),
                                         None => log::warn!(
@@ -4935,6 +4964,12 @@ impl AppMain for App {
                         self.current_prompt = None;
                         self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
                         self.update_empty_state_visibility(cx);
+                        // A card just rendered — collapse the floating composer to
+                        // the reveal pill so the card gets the full screen.
+                        if rendered_card {
+                            self.composer_shown = false;
+                        }
+                        self.sync_composer(cx);
                         // Clear the transient "Thinking..." status back to the
                         // idle connection line (it was set by ThinkingDelta and
                         // otherwise stuck after the reply landed).
