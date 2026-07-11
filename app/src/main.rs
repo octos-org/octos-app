@@ -4982,6 +4982,17 @@ impl AppMain for App {
                         // otherwise stuck after the reply landed).
                         self.update_status(cx);
                         cx.redraw_all();
+                        // A full-screen card just rendered: scroll it into view
+                        // (the redraw_all above can reset the list to the top).
+                        if rendered_card {
+                            let count = { CHAT_DATA.read().unwrap().messages.len() };
+                            let list = self
+                                .ui
+                                .widget(cx, ids!(chat_list))
+                                .portal_list(cx, ids!(list));
+                            list.set_tail_range(true);
+                            list.set_first_id_and_scroll(count.saturating_sub(1), 0.0);
+                        }
                     }
                     AgentEvent::PromptError { error, .. } => {
                         log!("aichat UI prompt error: {}", error);
