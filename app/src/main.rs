@@ -50,6 +50,10 @@ fenced code block containing Makepad Splash syntax — no prose before, \
 between, or after it, and no other fenced blocks.\n\n\
 Hard rules:\n\
 - `use mod.prelude.widgets.*` is auto-prepended; do NOT write imports.\n\
+- NAME the card: the FIRST line inside the block is `// name: <short-kebab-slug>` \
+(a unique, descriptive, STABLE id — e.g. `weather-sf`, `stocks-watchlist`). It is \
+stripped before rendering. If you are refining a card from YOUR SAVED CARDS below, \
+REUSE its exact same name.\n\
 - Do NOT wrap output in Root{{}} or Window{{}}; it is inserted into an \
 existing container.\n\
 - Interactivity + state: each card has its OWN independent state (keys you \
@@ -183,12 +187,105 @@ fn substitute_state_keys(text: &str, state: &CardState) -> String {
     out
 }
 
-/// Prepare a *raw* Splash body for a specific card: substitute its state values
-/// AND tag its notify calls with the card id. Used for bodies already extracted
-/// from their fence (fed straight to a `Splash` widget); whole messages go
-/// through `resolve_a2app_card`.
+/// Persistent registry of named A2App cards, so a card can be retrieved by
+/// name and refined/improved over time (`$HOME` is the app-private files dir
+/// on Android; see `set_var("HOME", get_data_dir())` at startup).
+fn a2app_cards_dir() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::Path::new(&home).join("a2app_cards"))
+}
+
+/// Extract the `// name: <slug>` directive the model puts on the FIRST line of a
+/// card body. Sanitized to a stable kebab slug so it names a file safely.
+fn extract_card_name(body: &str) -> Option<String> {
+    for line in body.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("// name:").or_else(|| t.strip_prefix("//name:")) {
+            let slug: String = rest
+                .trim()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                .collect();
+            let slug = slug.trim_matches('-').to_string();
+            if !slug.is_empty() {
+                return Some(slug.chars().take(48).collect());
+            }
+        }
+        // The directive lives at the very top; stop once real widget code starts.
+        if t.starts_with(|c: char| c.is_ascii_uppercase()) {
+            break;
+        }
+    }
+    None
+}
+
+/// Drop the `// name:` directive line before the body reaches the Splash VM
+/// (which does not accept `//` line comments — leaving it in crashes the card).
+/// Only matches a line whose trimmed text starts with `// name:`, so URLs
+/// containing `//` inside strings are untouched.
+fn strip_card_name_line(body: &str) -> std::borrow::Cow<'_, str> {
+    if !body.contains("// name:") && !body.contains("//name:") {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let kept: Vec<&str> = body
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            !(t.starts_with("// name:") || t.starts_with("//name:"))
+        })
+        .collect();
+    std::borrow::Cow::Owned(kept.join("\n"))
+}
+
+/// Persist a named card's runsplash DSL (with its `// name:` line) for reuse.
+fn save_a2app_card(name: &str, dsl: &str) {
+    if let Some(dir) = a2app_cards_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(format!("{name}.splash"));
+        match std::fs::write(&path, dsl) {
+            Ok(()) => log::info!("a2app: saved card '{name}' ({} bytes) → {}", dsl.len(), path.display()),
+            Err(e) => log::warn!("a2app: save card '{name}' failed: {e}"),
+        }
+    } else {
+        log::warn!("a2app: cannot save card '{name}' — no HOME/cards dir");
+    }
+}
+
+/// Load saved cards as `(name, dsl)`, newest-modified first, capped at `max`.
+fn load_a2app_cards(max: usize) -> Vec<(String, String)> {
+    let Some(dir) = a2app_cards_dir() else {
+        return Vec::new();
+    };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(std::time::SystemTime, String, String)> = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|x| x.to_str()) != Some("splash") {
+            continue;
+        }
+        let name = p.file_stem().and_then(|x| x.to_str()).unwrap_or("").to_string();
+        let mtime = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if let Ok(dsl) = std::fs::read_to_string(&p) {
+            if !name.is_empty() {
+                entries.push((mtime, name, dsl));
+            }
+        }
+    }
+    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.into_iter().take(max).map(|(_, n, d)| (n, d)).collect()
+}
+
+/// Prepare a *raw* Splash body for a specific card: drop the `// name:`
+/// directive, substitute its state values, neutralize bare `View{}`, and tag
+/// its notify calls with the card id.
 fn substitute_card_state(body: &str, item_id: usize, state: &CardState) -> String {
-    let subst = substitute_state_keys(body, state);
+    let named = strip_card_name_line(body);
+    let subst = substitute_state_keys(&named, state);
     let safe = neutralize_bare_view(&subst);
     tag_notify_calls(&safe, item_id)
 }
@@ -276,7 +373,9 @@ fn app_splash_followup(request: &str) -> String {
         "Respond with EXACTLY ONE ```runsplash fenced block (Makepad Splash \
 syntax, no prose, no other fences), following the Splash manual already \
 provided earlier in this conversation. Same rules: no imports, no \
-Root/Window wrapper. Each card has its OWN state: read `{{{{state.<key>}}}}`; \
+Root/Window wrapper. FIRST line inside the block = `// name: <slug>` (reuse the \
+same name when refining one of YOUR SAVED CARDS below). Each card has its OWN \
+state: read `{{{{state.<key>}}}}`; \
 change it with `agent.notify(\"inc\"/\"dec\"/\"reset\", {{key: \"count\"}})` for \
 numbers or `agent.notify(\"set\", {{key, value}})` for strings. Internet images: \
 `Image{{ src: http_resource(\"https://…\") fit: ImageFit.Smallest }}`; refreshable \
@@ -3093,12 +3192,30 @@ impl App {
         // LLM receives the Splash UI-generation prompt + manual so it returns
         // a `runsplash` block the Markdown widget renders live.
         let sent = if self.splash_mode {
-            if self.splash_primed {
+            let base = if self.splash_primed {
                 // Manual already in session history — send a short directive.
                 app_splash_followup(&text)
             } else {
                 self.splash_primed = true;
                 app_splash_prompt(&text)
+            };
+            // Attach the user's saved named cards so the model can retrieve and
+            // refine one by name ("improve the weather card" → the weather-sf
+            // card's DSL is right here to edit and re-emit).
+            let saved = load_a2app_cards(6);
+            log::info!("a2app: injecting {} saved card(s) into prompt", saved.len());
+            if saved.is_empty() {
+                base
+            } else {
+                let mut lib = String::from(
+                    "\n\nYOUR SAVED CARDS — if this request refines/improves/changes one of \
+these, edit that card and return the FULL updated block KEEPING its exact \
+`// name:` line:\n",
+                );
+                for (name, dsl) in &saved {
+                    lib.push_str(&format!("\n[{name}]\n```runsplash\n{}\n```\n", dsl.trim()));
+                }
+                format!("{base}{lib}")
             }
         } else {
             text.clone()
@@ -4790,6 +4907,16 @@ impl AppMain for App {
                         data.thinking_text.clear();
                         if !text.is_empty() {
                             if assistant_message_is_safe_to_store(&text) {
+                                // Persist a named A2App card so it can be
+                                // retrieved by name and refined over time.
+                                if let Some(body) = extract_runsplash_body(&text) {
+                                    match extract_card_name(body) {
+                                        Some(name) => save_a2app_card(&name, body),
+                                        None => log::warn!(
+                                            "a2app: runsplash card has no `// name:` line — not saved"
+                                        ),
+                                    }
+                                }
                                 data.messages.push(ChatMessage {
                                     role: ChatRole::Assistant,
                                     text,
