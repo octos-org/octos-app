@@ -86,6 +86,38 @@ cargo makepad android build -p octos-app --release
 # package: dev.makepad.octos_app / .MakepadApp
 ```
 
+### 4b. Self-contained build (bundle octos, stdio transport)
+
+On Android the app talks to octos over **stdio** — it spawns
+`liboctos.so serve --stdio` (NDJSON JSON-RPC on stdin/stdout), no `octos serve`
+daemon and no TCP port. `untrusted_app` may only exec from its
+nativeLibraryDir, so the server binary must ship inside the APK as a `lib*.so`.
+
+Bundle it with the `MAKEPAD_ANDROID_EXTRA_LIBS` env var (requires the
+cargo-makepad patch on `ymote/makepad@dev`, commit `ad2fe48` — rebuild the tool
+with `RUSTFLAGS="-Cprofile-use=$PWD/libs/box3d/box3d.profdata" cargo install
+--path tools/cargo_makepad --force` from the makepad checkout):
+
+```sh
+cd octos-app
+export MAKEPAD_ANDROID_EXTRA_LIBS="liboctos.so=$(cd ../octos && pwd)/target/aarch64-linux-android/release/octos"
+cargo makepad android build -p octos-app --release   # look for "Bundled extra native lib: liboctos.so"
+# APK grows to ~98 MB; verify: unzip -l …/octos_app.apk | grep liboctos.so
+```
+
+On install, Android extracts `lib/arm64-v8a/liboctos.so` to the app's
+nativeLibraryDir as a real, exec-able file. If the binary is absent (plain
+build), the app cleanly falls back to the WebSocket transport.
+
+The stdio child needs a **per-app octos home** it can read/write under SELinux
+(the app's own data dir — it cannot touch `/data/local/tmp`). The app spawns
+octos with `HOME=/data/user/0/dev.makepad.octos_app/files/octos-home`; provision
+that dir (owner = app uid, `restorecon`) with `.config/octos/config.json` whose
+`env_vars.DEEPSEEK_API_KEY` holds the key inline — so the **app process never
+handles the secret** (see step 6 for the config shape). A `.octos/profiles/yue`
+profile must exist there. (Productionizing this via the QR/`apply_provision_string`
+flow is a follow-up; today it is seeded by copying a working home.)
+
 ## 5. Deploy to the phone
 
 Device: OnePlus 6, serial `cfb7c9e3`.
