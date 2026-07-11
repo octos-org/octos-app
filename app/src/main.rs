@@ -72,28 +72,39 @@ cache-buster query param bound to a counter, plus a button that increments it \
 — each tap loads a new picture (never put `{{{{state.*}}}}` as the WHOLE url):\n\
     Image{{ src: http_resource(\"https://picsum.photos/400/240?sig={{{{state.count}}}}\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
     Button{{ text: \"New Photo\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
-- IMMERSIVE FULL-SCREEN WEATHER/PLACE CARD (iOS lock-screen style — the DEFAULT for \
-weather, places, travel): a REAL photo of the place FILLS the whole screen (9:16) \
-with the text overlaid at the bottom over a dark gradient. Use this EXACT structure — \
-an Overlay of image, then dark scrim, then text pinned to the bottom:\n\
-    View{{ width: Fill height: 700 flow: Overlay\n\
-        Image{{ src: http_resource(sys.photo(\"tokyo skyline cityscape\")) fit: ImageFit.CropToFill width: Fill height: Fill }}\n\
-        GradientYView{{ width: Fill height: Fill draw_bg.color: #00000000 draw_bg.color_2: #000000E6 }}\n\
-        View{{ width: Fill height: Fill flow: Down align: {{x: 0.0 y: 1.0}} padding: Inset{{left: 28 right: 28 bottom: 64}}\n\
+- IMMERSIVE FULL-SCREEN iOS WEATHER CARD (the DEFAULT for weather): a REAL photo of \
+the city fills the whole screen; the CURRENT conditions sit in the upper area and a \
+translucent 7-DAY FORECAST panel sits at the bottom — like the real iOS Weather app. \
+Reproduce this EXACT structure (a full-screen Overlay: photo, dark scrim, then a Down \
+column = current block, a Filler, then the forecast panel), substituting real data:\n\
+    SolidView{{ width: Fill height: 700 flow: Overlay new_batch: true draw_bg.color: #000000\n\
+        Image{{ src: http_resource(sys.photo(\"tokyo skyline clear sky\")) fit: ImageFit.Stretch width: Fill height: Fill draw_bg.color: #000000 }}\n\
+        GradientYView{{ width: Fill height: Fill draw_bg.color: #00000022 draw_bg.color_2: #000000DD }}\n\
+        View{{ width: Fill height: Fill flow: Down padding: Inset{{left: 26 top: 34 right: 26 bottom: 14}}\n\
             Label{{ text: \"Tokyo\" draw_text.color: #ffffff draw_text.text_style.font_size: 26 }}\n\
-            Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 88 margin: Inset{{top: 8 bottom: 4}} }}\n\
-            Label{{ text: \"Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 19 }}\n\
-            Label{{ text: \"H:78°  L:64°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 16 }}\n\
+            Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 56 margin: Inset{{top: 0 bottom: 0}} }}\n\
+            Label{{ text: \"☀️  Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 18 }}\n\
+            Label{{ text: \"H:78°   L:64°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 15 }}\n\
+            Filler{{}}\n\
+            RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 padding: Inset{{left: 16 top: 8 right: 16 bottom: 8}} draw_bg.color: #00000055 draw_bg.border_radius: 22.0\n\
+                SolidView{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} padding: Inset{{top: 5 bottom: 5}} draw_bg.color: #00000000\n\
+                    Label{{ width: 100 text: \"Today\" draw_text.color: #ffffff draw_text.text_style.font_size: 16 }}\n\
+                    Label{{ width: 44 text: \"☀️\" draw_text.text_style.font_size: 20 }}\n\
+                    Filler{{}}\n\
+                    Label{{ text: \"64°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 16 }}\n\
+                    Label{{ width: 58 text: \"78°\" draw_text.color: #ffffff draw_text.text_style.font_size: 16 }}\n\
+                }}\n\
+                // …repeat that SolidView row for the next 6 days (Mon, Tue, …), each \
+with its own weather emoji and lo/hi. 7 rows total.\n\
+            }}\n\
         }}\n\
     }}\n\
-  REAL IMAGE — call the built-in `sys.photo(\"<place + scene keywords>\")` inside \
-`http_resource(...)`: it returns a real full-screen (9:16) photo URL for that \
-subject, e.g. `http_resource(sys.photo(\"kyoto temple autumn\"))` or \
-`http_resource(sys.photo(\"london rainy street\"))`. Pass the CITY plus a couple of \
-scene/weather words. The GradientYView is a dark scrim (transparent top -> dark \
-bottom) so the WHITE text stays readable over ANY photo. Keep `height: 700` (fills \
-the whole screen), and put ALL text in the BOTTOM overlay (align y: 1.0). The hero \
-temperature keeps its margin.\n\
+  RULES: current block (city, big temp, `emoji + condition`, H/L) is at the TOP (top \
+padding 74 keeps it off the status bar). `Filler{{}}` pushes the forecast to the \
+BOTTOM. The forecast is a translucent RoundedView with ONE SolidView row per day: day \
+name (left), a weather EMOJI (☀️ sunny, ⛅ partly, ☁️ cloudy, 🌧️ rain, ⛈️ storm, \
+❄️ snow), then a Filler, then lo° (dim) and hi° (white) on the right. Give 7 rows. \
+Image: `sys.photo(\"<city> <scene/weather>\")`.\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
 - CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
@@ -178,7 +189,12 @@ fn neutralize_bare_view(body: &str) -> String {
             continue;
         }
         out.push_str(&body[last..pos]);
-        out.push_str("SolidView{show_bg: false ");
+        // Bare `View{}` crashes the Splash eval, so substitute a safe container.
+        // NOT SolidView — this fork's SolidView paints an uninitialized red fill
+        // regardless of draw_bg.color (seen as red bands where a card didn't
+        // opaquely cover). RoundedView honours draw_bg.color, so a transparent
+        // fill makes the substitute invisible.
+        out.push_str("RoundedView{draw_bg.color: #00000000 draw_bg.border_radius: 0.0 ");
         last = pos + "View{".len();
         search = last;
     }
@@ -903,6 +919,10 @@ script_mod! {
                             new_batch: true
                             width: Fill
                             height: Fit
+                            // Transparent — a SolidView with no color paints the
+                            // uninitialized default (red), which showed through
+                            // the card's translucent scrim as red bands.
+                            draw_bg.color: #00000000
                             splash_view := Splash {
                                 flow: Overlay
                                 width: Fill
@@ -2628,8 +2648,23 @@ impl Widget for ChatList {
                 let msg_count = data.messages.len();
                 let items_len = msg_count + data.is_streaming as usize;
                 list.set_item_range(cx, 0, items_len);
+                // Weather app shows ONLY the newest card — pin the list to it
+                // every draw so it can't drift to a stale/empty scroll position.
+                if items_len > 0 {
+                    list.set_first_id_and_scroll(items_len - 1, 0.0);
+                }
 
                 while let Some(item_id) = list.next_visible_item(cx) {
+                    // Weather app: show ONLY the newest card full-screen (the
+                    // streaming item while generating, else the last message).
+                    // Collapse every earlier item to zero height — a scrollable
+                    // stack of full-screen cards scrolled unstably.
+                    if item_id + 1 < items_len {
+                        let item_widget = list.item(cx, item_id, id!(User));
+                        item_widget.set_visible(cx, false);
+                        item_widget.draw_all_unscoped(cx);
+                        continue;
+                    }
                     if data.is_streaming && item_id == msg_count {
                         let just_started = self.animating_msg != Some(item_id);
                         if just_started {
@@ -2786,6 +2821,14 @@ pub struct App {
     /// warnings). Empty when no toast is showing.
     #[rust]
     toast_timer: Timer,
+    /// After a card renders, a brief repaint burst so the newest card's remote
+    /// background image adopts its decoded texture from the ImageCache (the
+    /// Image widget self-heals on draw, but the app is otherwise idle after the
+    /// card lands, so nothing would trigger that draw). Parks after a few ticks.
+    #[rust]
+    settle_timer: Timer,
+    #[rust]
+    settle_ticks: u32,
     /// ~10 Hz repaint driver while a turn streams. Deltas only accumulate
     /// text + set `stream_dirty`; this interval turns them into redraws so a
     /// fast token stream doesn't re-parse/redraw the thread per token.
@@ -4830,6 +4873,17 @@ impl AppMain for App {
                 self.stream_tick = Timer::empty();
             }
         }
+        // Post-card repaint burst: draw for ~5.6s so a remote background image
+        // adopts its texture (Image::draw_walk self-heals from the cache) once
+        // its fetch+decode settle, then park.
+        if self.settle_timer.is_event(event).is_some() {
+            self.settle_ticks += 1;
+            cx.redraw_all();
+            if self.settle_ticks >= 16 {
+                cx.stop_timer(self.settle_timer);
+                self.settle_timer = Timer::empty();
+            }
+        }
         // Toast auto-dismiss: pop the shown toast and advance to the next.
         if self.toast_timer.is_event(event).is_some() {
             self.toast_timer = Timer::empty();
@@ -4994,6 +5048,10 @@ impl AppMain for App {
                                 .portal_list(cx, ids!(list));
                             list.set_tail_range(true);
                             list.set_first_id_and_scroll(count.saturating_sub(1), 0.0);
+                            // Repaint burst so the card's background image adopts
+                            // its decoded texture once the fetch+decode settle.
+                            self.settle_ticks = 0;
+                            self.settle_timer = cx.start_interval(0.35);
                         }
                     }
                     AgentEvent::PromptError { error, .. } => {
