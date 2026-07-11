@@ -7,7 +7,9 @@ authors.workspace = true
 description = "WebSocket + REST snapshot transport for octos-app — speaks the UI Protocol v1"
 
 [dependencies]
-tokio             = { workspace = true }
+# `process` + `io-util` (atop the workspace's rt/macros/net/time/sync) back the
+# stdio transport: spawning `octos serve --stdio` and NDJSON pipe framing.
+tokio             = { workspace = true, features = ["process", "io-util"] }
 tokio-tungstenite = { workspace = true }
 futures-util      = { workspace = true }
 serde             = { workspace = true }

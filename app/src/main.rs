@@ -17,7 +17,7 @@ use makepad_widgets::makepad_draw::svg::{
 use makepad_widgets::*;
 use octos_app_store::auth::ProfileId;
 use octos_app_transport::{
-    Capabilities, ProfileId as TransportProfileId, SecretString, TransportConfig,
+    Capabilities, ProfileId as TransportProfileId, SecretString, StdioSpawn, TransportConfig,
 };
 use streaming_markdown_kit::{
     streaming_display_with_latex_autowrap_remend, wrap_bare_latex, SanitizeOptions,
@@ -70,11 +70,12 @@ User request: {request}",
     )
 }
 
-/// Substitute `{{state.<path>}}` placeholders in a generated A2App/Splash
-/// block with live values before rendering. `count` fills `{{state.count}}`;
-/// any other path renders as `0` so nothing shows raw `{{…}}`. No-op for
-/// normal messages (they contain no such tokens).
-fn resolve_a2app_placeholders(text: &str, count: i64) -> String {
+/// Substitute every `{{state.<path>}}` token in a *raw* Splash script body with
+/// the live counter. MVP tracks one shared number, so every state key the LLM
+/// chose (count, score, value, total, …) renders the same `count`. Used for
+/// bodies already extracted from their fence and fed straight to a `Splash`
+/// widget; whole messages go through `resolve_a2app_placeholders` instead.
+fn substitute_state(text: &str, count: i64) -> String {
     if !text.contains("{{state.") {
         return text.to_string();
     }
@@ -84,15 +85,51 @@ fn resolve_a2app_placeholders(text: &str, count: i64) -> String {
         out.push_str(&rest[..pos]);
         let after = &rest[pos + "{{state.".len()..];
         if let Some(end) = after.find("}}") {
-            // Single shared counter — substitute it for WHATEVER state key the
-            // LLM chose (count, score, value, total, …). MVP tracks one number,
-            // so every `{{state.*}}` shows it rather than guessing the name.
             let _key = &after[..end];
             out.push_str(&count.to_string());
             rest = &after[end + 2..];
         } else {
             out.push_str(&rest[pos..]);
             return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Substitute `{{state.*}}` placeholders in a whole message, but ONLY inside
+/// ```runsplash fenced blocks (the generated live UI). Occurrences in ordinary
+/// prose or other code fences are left verbatim — they're the model's own text
+/// or documentation, not live state, and rewriting them to the counter value
+/// was a bug (`{{state.count}}` in an explanation became `0`). No-op for normal
+/// messages: no runsplash block ⇒ nothing to substitute.
+fn resolve_a2app_placeholders(text: &str, count: i64) -> String {
+    if !text.contains("```runsplash") || !text.contains("{{state.") {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("```runsplash") {
+        // Copy up to and including the opening fence line verbatim.
+        let after_marker = open + "```runsplash".len();
+        let line_end = match rest[after_marker..].find('\n') {
+            Some(nl) => after_marker + nl + 1,
+            None => rest.len(),
+        };
+        out.push_str(&rest[..line_end]);
+        let body_and_rest = &rest[line_end..];
+        // Body runs to the closing fence; substitute only within it. The
+        // closing ``` is copied verbatim by the next iteration's prefix (or the
+        // trailing push below).
+        match body_and_rest.find("```") {
+            Some(close) => {
+                out.push_str(&substitute_state(&body_and_rest[..close], count));
+                rest = &body_and_rest[close..];
+            }
+            None => {
+                out.push_str(&substitute_state(body_and_rest, count));
+                return out;
+            }
         }
     }
     out.push_str(rest);
@@ -134,6 +171,21 @@ fn extract_runsplash_body(text: &str) -> Option<&str> {
     let body = &after[body_start..];
     let end = body.find("```")?;
     Some(body[..end].trim_end())
+}
+
+/// Render an in-progress reasoning/thinking stream as a dimmed markdown
+/// blockquote, shown above the (not-yet-started) answer so thinking-capable
+/// models' live thoughts are visible instead of a bare "Thinking…" placeholder.
+/// Ephemeral — replaced by the answer once its first token lands.
+fn as_thinking_blockquote(thinking: &str) -> String {
+    let mut out = String::with_capacity(thinking.len() + 32);
+    out.push_str("> \u{1F4AD} *Thinking\u{2026}*\n>\n");
+    for line in thinking.lines() {
+        out.push_str("> ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Short A2App directive for follow-up requests in a session that already has
@@ -2402,11 +2454,15 @@ impl Widget for ChatList {
                             .button(cx, ids!(share_button))
                             .set_visible(cx, false);
                         let streaming_body;
+                        let thinking_body;
                         let text: &str = if data.streaming_text.is_empty() {
                             if data.thinking_text.is_empty() {
                                 "..."
                             } else {
-                                "Thinking..."
+                                // Show the live reasoning stream (dimmed
+                                // blockquote) until the answer's first token.
+                                thinking_body = as_thinking_blockquote(&data.thinking_text);
+                                &thinking_body
                             }
                         } else {
                             let opts = SanitizeOptions {
@@ -2750,6 +2806,7 @@ impl App {
                     cursor: None,
                     requested_capabilities: Capabilities::requested(),
                     workspace_cwd: Self::current_workspace_cwd(),
+                    stdio: Self::stdio_spawn(),
                 };
             } else {
                 log::warn!(
@@ -2776,7 +2833,62 @@ impl App {
             cursor: None,
             requested_capabilities: Capabilities::requested(),
             workspace_cwd: Self::current_workspace_cwd(),
+            stdio: Self::stdio_spawn(),
         }
+    }
+
+    /// Build the stdio-transport spawn spec. On Android the app runs the
+    /// bundled `octos` binary as `serve --stdio` instead of dialing a
+    /// WebSocket: no `octos serve` daemon, no TCP port. `untrusted_app` can
+    /// only exec from its nativeLibraryDir, so the binary must ship there as a
+    /// `lib*.so`; we locate that dir from our own mapped `libmakepad.so`.
+    /// `HOME` points at an app-private octos home whose
+    /// `.config/octos/config.json` carries the provider + inline key — so the
+    /// app process never holds the LLM secret. Returns `None` (⇒ WebSocket) on
+    /// desktop, or on Android when the bundled binary is absent (safe
+    /// fallback: the app still boots against a remote `octos serve`).
+    #[cfg(target_os = "android")]
+    fn stdio_spawn() -> Option<StdioSpawn> {
+        let lib_dir = Self::android_native_lib_dir()?;
+        let program = lib_dir.join("liboctos.so");
+        if !program.exists() {
+            log::warn!(
+                "stdio: bundled octos not found at {}; using WebSocket transport",
+                program.display()
+            );
+            return None;
+        }
+        let home = std::path::PathBuf::from("/data/user/0/dev.makepad.octos_app/files/octos-home");
+        log::info!("stdio: octos={} HOME={}", program.display(), home.display());
+        Some(StdioSpawn {
+            program,
+            args: vec!["serve".to_owned(), "--stdio".to_owned()],
+            env: vec![("HOME".to_owned(), home.to_string_lossy().into_owned())],
+            cwd: Some(home),
+        })
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn stdio_spawn() -> Option<StdioSpawn> {
+        // Desktop dev keeps the WebSocket transport (talk to `octos serve`).
+        None
+    }
+
+    /// Locate the app's nativeLibraryDir by scanning `/proc/self/maps` for our
+    /// own already-mapped `libmakepad.so` — avoids a JNI round-trip to
+    /// `ApplicationInfo.nativeLibraryDir` (the path carries a per-install hash,
+    /// so it can't be hard-coded).
+    #[cfg(target_os = "android")]
+    fn android_native_lib_dir() -> Option<std::path::PathBuf> {
+        let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+        for line in maps.lines() {
+            let Some(slash) = line.find('/') else { continue };
+            let path = &line[slash..];
+            if path.ends_with("/libmakepad.so") {
+                return std::path::Path::new(path).parent().map(|p| p.to_path_buf());
+            }
+        }
+        None
     }
 
     fn current_workspace_cwd() -> Option<String> {
@@ -3015,7 +3127,8 @@ impl App {
                 // guarantees the update even if the markdown re-parse doesn't
                 // re-dispatch to the pooled splash_view.
                 if let Some(body) = extract_runsplash_body(&text) {
-                    let resolved = resolve_a2app_placeholders(body, count);
+                    // Raw body (no fence) → substitute unconditionally.
+                    let resolved = substitute_state(body, count);
                     item.widget(cx, ids!(splash_view)).set_text(cx, &resolved);
                 }
             }
@@ -3705,12 +3818,16 @@ impl MatchEvent for App {
         {
             self.apply_glass_opacity(cx, opacity);
         }
-        // Cosmetic toggle in M1 — Octos handles thinking server-side per
-        // profile (see `05-AICHAT-REUSE-MAP.md` table for `thinking_toggle`),
-        // so the checkbox is read but its value is intentionally inert.
-        // Kept in the live-DSL for visual continuity with the lifted
-        // composer; W08 may repurpose it as a per-session preference.
-        let _ = self.ui.check_box(cx, ids!(thinking_toggle)).changed(actions);
+        // "Thinking" toggle → per-turn reasoning-effort override on the agent
+        // (thinking-capable models: DeepSeek V4, OpenAI reasoning, Grok-4).
+        // Applied to every subsequent turn until toggled off; the live stream
+        // then surfaces reasoning deltas above the answer (see
+        // `OctosUiAgent::set_thinking` and `as_thinking_blockquote`).
+        if let Some(on) = self.ui.check_box(cx, ids!(thinking_toggle)).changed(actions) {
+            if let Some(agent) = &mut self.agent {
+                agent.set_thinking(on);
+            }
+        }
 
         // Splash toggle drives `splash_mode` for the next message.
         if let Some(active) = self.ui.check_box(cx, ids!(splash_toggle)).changed(actions) {

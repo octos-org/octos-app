@@ -16,7 +16,7 @@ use makepad_widgets::*;
 use octos_app_store::state::{reduce as store_reduce, ConnectionEvent, Event as StoreEvent};
 use octos_app_store::toasts::{Toast, ToastKind};
 use octos_app_transport::{
-    ws, Capabilities, ConnectionState, LifecycleResult, OutboundCommand, TransportConfig,
+    stdio, ws, Capabilities, ConnectionState, LifecycleResult, OutboundCommand, TransportConfig,
     TransportEvent,
 };
 use octos_core::app_ui::{
@@ -25,7 +25,8 @@ use octos_core::app_ui::{
     AppUiSubmitPrompt as TurnStartParams,
 };
 use octos_core::ui_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalRespondParams, TaskOutputReadParams, UiCursor,
+    ApprovalDecision, ApprovalId, ApprovalRespondParams, ReasoningEffortLevel, TaskOutputReadParams,
+    UiCursor,
 };
 use octos_core::{ui_protocol::TurnId, SessionKey};
 use tokio::runtime::Runtime;
@@ -84,6 +85,15 @@ pub struct OctosUiAgent {
     /// Profile id from the transport config — fallback owner for sidebar
     /// rows the server returns without a `profile_id` (session/list).
     fallback_profile: String,
+    /// "Thinking" composer toggle state. When on, every turn requests a
+    /// per-turn reasoning-effort override (thinking-capable models: DeepSeek
+    /// V4, OpenAI reasoning models, Grok-4). Set by `Agent::set_thinking`;
+    /// `None` (off) falls back to the gateway/profile default.
+    thinking: bool,
+    /// True when the stdio transport is in use (spawned `octos serve --stdio`)
+    /// rather than WebSocket. Stdio carries no `X-Profile-Id` header, so
+    /// `session/open` must name the profile in its params instead.
+    stdio_transport: bool,
 }
 
 impl OctosUiAgent {
@@ -98,6 +108,7 @@ impl OctosUiAgent {
     pub fn new(config: TransportConfig) -> Self {
         let workspace_cwd = config.workspace_cwd.clone();
         let fallback_profile = config.profile_id.0.clone();
+        let stdio_transport = config.stdio.is_some();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -108,12 +119,15 @@ impl OctosUiAgent {
             // Wake the makepad UI thread whenever a transport event queues —
             // otherwise replies that land while the app is idle (no touch,
             // no animation) sit undrained until the next unrelated event.
-            ws::spawn_with_waker(
-                config,
-                Some(std::sync::Arc::new(|| {
-                    makepad_widgets::SignalToUI::set_ui_signal();
-                })),
-            )
+            let waker = Some(std::sync::Arc::new(|| {
+                makepad_widgets::SignalToUI::set_ui_signal();
+            }) as std::sync::Arc<dyn Fn() + Send + Sync>);
+            // stdio spawns `octos serve --stdio` as a child; ws dials a socket.
+            if stdio_transport {
+                stdio::spawn_with_waker(config, waker)
+            } else {
+                ws::spawn_with_waker(config, waker)
+            }
         };
         Self {
             _runtime: runtime,
@@ -128,6 +142,8 @@ impl OctosUiAgent {
             capabilities: None,
             workspace_cwd,
             fallback_profile,
+            thinking: false,
+            stdio_transport,
         }
     }
 
@@ -152,6 +168,14 @@ impl OctosUiAgent {
             *BOOT_NONCE,
             session_id.0.0 as u32
         ))
+    }
+
+    /// Profile to name in `session/open` params. The stdio transport carries
+    /// no `X-Profile-Id` header, so the profile must ride in the params; the
+    /// WebSocket transport uses the header and leaves this `None` (unchanged
+    /// behaviour).
+    fn open_profile_id(&self) -> Option<String> {
+        self.stdio_transport.then(|| self.fallback_profile.clone())
     }
 
     /// Best-effort post to the transport task. Logs (and drops) on a closed
@@ -508,12 +532,13 @@ impl Agent for OctosUiAgent {
         log::info!("octos-ui-agent: create_session → session/open {}", key.0);
         self.session_keys.insert(session_id, key.clone());
         self.session_ids.insert(key.clone(), session_id);
+        let profile_id = self.open_profile_id();
         self.post(OutboundCommand::OpenSession(SessionOpenParams {
             session_id: key,
             // 2026-07 protocol catch-up: server-side session topic label and
             // per-session sandbox override — both server-defaulted when None.
             topic: None,
-            profile_id: None,
+            profile_id,
             cwd: self.workspace_cwd.clone(),
             sandbox: None,
             after: None,
@@ -538,12 +563,13 @@ impl Agent for OctosUiAgent {
             sid
         };
         log::info!("octos-ui-agent: resume_session → {}", key.0);
+        let profile_id = self.open_profile_id();
         // Fresh open (no cursor bracket): the connection cursor belongs to
         // the session we're switching AWAY from.
         self.post(OutboundCommand::OpenSessionFresh(SessionOpenParams {
             session_id: key.clone(),
             topic: None,
-            profile_id: None,
+            profile_id,
             cwd: self.workspace_cwd.clone(),
             sandbox: None,
             after: None,
@@ -573,10 +599,16 @@ impl Agent for OctosUiAgent {
             media: Vec::new(),
             topic: None,
             rewrite_for: None,
-            reasoning_effort: None,
+            // Driven by the composer's "Thinking" toggle (`set_thinking`).
+            // `High` when on; `None` defers to the gateway/profile default.
+            reasoning_effort: self.thinking.then_some(ReasoningEffortLevel::High),
             live_video: false,
         }));
         prompt_id
+    }
+
+    fn set_thinking(&mut self, on: bool) {
+        self.thinking = on;
     }
 
     fn send_tool_result(

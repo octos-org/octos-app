@@ -2,33 +2,27 @@
 //! the connection state machine (`Idle → Dialing → Handshaking → Live ↔
 //! Reconnecting → Failed`). The inner `select!` arbitrates outbound commands,
 //! inbound frames, and 30-s heartbeat ticks; reconnect uses W01's full-jitter
-//! backoff with a 5-min cumulative budget.
+//! backoff with a 5-min cumulative budget. Command dispatch and inbound frame
+//! handling are delegated to `crate::proto` (shared with the stdio transport);
+//! this module only owns the socket and reconnect policy.
 
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use octos_core::app_ui::AppUiBackendEvent as UiNotification;
-use octos_core::ui_protocol::{
-    methods, ApprovalRespondResult, DiffPreviewGetResult, RpcError, TaskOutputReadResult,
-    UiCursor, UiRpcResult,
-};
-use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::handshake::client::Request as WsRequest;
 use tokio_tungstenite::tungstenite::http::Uri as WsUri;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::capability::Capabilities;
-use crate::jsonrpc::{serialize_request, JsonRpcId, RpcEnvelope, RpcRegistry};
+use crate::proto::{
+    build_outbound, handle_inbound_text, try_emit, Outbound, SharedState, CHANNEL_BUFFER,
+};
 use crate::{
-    ConnectionState, LifecycleResult, OutboundCommand, ProfileId, SecretString,
-    TransportConfig, TransportEvent,
+    ConnectionState, OutboundCommand, ProfileId, SecretString, TransportConfig, TransportEvent,
 };
 
-pub const CHANNEL_BUFFER: usize = 64;
 pub const RECONNECT_DELAY_MAX: Duration = Duration::from_secs(30);
 pub const RECONNECT_BUDGET: Duration = Duration::from_secs(5 * 60);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -84,39 +78,6 @@ pub fn spawn_with_waker(
     (cmd_tx, evt_rx)
 }
 
-struct PendingRequest {
-    method: &'static str,
-    reply: PendingReply,
-}
-
-enum PendingReply {
-    Lifecycle,
-    Approval(oneshot::Sender<Result<ApprovalRespondResult, RpcError>>),
-    DiffPreview(oneshot::Sender<Result<DiffPreviewGetResult, RpcError>>),
-    TaskOutput(oneshot::Sender<Result<TaskOutputReadResult, RpcError>>),
-    /// `session/list` — result re-emitted as `TransportEvent::SessionsListed`.
-    SessionList,
-    /// `session/hydrate` — result re-emitted as
-    /// `TransportEvent::SessionHydrated` tagged with the session key.
-    SessionHydrate { session_id: String },
-}
-
-struct SharedState {
-    cursor: Option<UiCursor>,
-    pending: HashMap<JsonRpcId, PendingRequest>,
-    registry: Arc<RpcRegistry>,
-}
-
-impl SharedState {
-    fn new(cursor: Option<UiCursor>) -> Self {
-        Self {
-            cursor,
-            pending: HashMap::new(),
-            registry: Arc::new(RpcRegistry::new()),
-        }
-    }
-}
-
 fn build_ws_uri(base: &url::Url) -> Result<WsUri, String> {
     let mut url = base.clone();
     let scheme = match url.scheme() {
@@ -161,38 +122,6 @@ fn build_request(
         );
     }
     Ok(req)
-}
-
-/// `message/delta` is the only ephemeral notification per
-/// `03-PROTOCOL-CONTRACT.md` § "Live streaming output".
-fn is_ephemeral_method(method: &str) -> bool {
-    method == methods::MESSAGE_DELTA
-}
-
-/// Try to send an event without blocking. Logs a warning if the receiver
-/// can't keep up — backpressure protects the WS read loop from a slow UI.
-fn try_emit(events: &mpsc::Sender<TransportEvent>, evt: TransportEvent) {
-    match events.try_send(evt) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            log::warn!("transport: event channel full, dropping frame");
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {}
-    }
-}
-
-async fn emit_durable_notification(
-    events: &mpsc::Sender<TransportEvent>,
-    payload: UiNotification,
-    cursor: Option<UiCursor>,
-) {
-    if events
-        .send(TransportEvent::DurableNotification { payload, cursor })
-        .await
-        .is_err()
-    {
-        log::debug!("transport: event receiver closed while sending durable notification");
-    }
 }
 
 async fn run_state_machine(
@@ -295,7 +224,7 @@ async fn run_live(
                 };
                 match frame {
                     Ok(WsMessage::Text(text)) => {
-                        if let Some(t) = handle_text_frame(&text, shared, events, &mut state).await {
+                        if let Some(t) = handle_inbound_text(&text, shared, events, &mut state).await {
                             try_emit(events, TransportEvent::ConnectionState(t));
                         }
                     }
@@ -339,250 +268,19 @@ async fn handle_command<S>(
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let id = shared.registry.next_id();
-    let (method, body, pending): (&'static str, Value, Option<PendingReply>) = match cmd {
-        OutboundCommand::OpenSession(mut params) => {
-            // Resume bracket: replay from the last in-memory cursor when one exists.
-            if params.after.is_none() {
-                params.after = shared.cursor.clone();
+    match build_outbound(cmd, shared) {
+        Outbound::Disconnect => CommandOutcome::Disconnect,
+        Outbound::Skip => CommandOutcome::Continue,
+        Outbound::Send { id, frame, pending } => {
+            if ws_tx.send(WsMessage::Text(frame)).await.is_err() {
+                return CommandOutcome::SocketError;
             }
-            (methods::SESSION_OPEN, to_value(&params), Some(PendingReply::Lifecycle))
-        }
-        OutboundCommand::OpenSessionFresh(params) => {
-            // Session switch: the tracked cursor belongs to the PREVIOUS
-            // session — don't bracket, and drop it so future replays track
-            // the session being opened instead.
-            shared.cursor = None;
-            (methods::SESSION_OPEN, to_value(&params), Some(PendingReply::Lifecycle))
-        }
-        OutboundCommand::StartTurn(p) => (methods::TURN_START, to_value(&p), Some(PendingReply::Lifecycle)),
-        OutboundCommand::InterruptTurn(p) => (methods::TURN_INTERRUPT, to_value(&p), Some(PendingReply::Lifecycle)),
-        OutboundCommand::SendApprovalResponse { params, reply } => {
-            (methods::APPROVAL_RESPOND, to_value(&params), Some(PendingReply::Approval(reply)))
-        }
-        OutboundCommand::FetchDiffPreview { params, reply } => {
-            (methods::DIFF_PREVIEW_GET, to_value(&params), Some(PendingReply::DiffPreview(reply)))
-        }
-        OutboundCommand::RequestTaskOutput { params, reply } => {
-            (methods::TASK_OUTPUT_READ, to_value(&params), Some(PendingReply::TaskOutput(reply)))
-        }
-        OutboundCommand::ListSessions => (
-            methods::SESSION_LIST,
-            to_value(&octos_core::ui_protocol::SessionListParams {}),
-            Some(PendingReply::SessionList),
-        ),
-        OutboundCommand::HydrateSession { session_id } => (
-            methods::SESSION_HYDRATE,
-            to_value(&octos_core::ui_protocol::SessionHydrateParams {
-                session_id: octos_core::SessionKey(session_id.clone()),
-                after: None,
-                include: vec!["messages".to_owned()],
-            }),
-            Some(PendingReply::SessionHydrate { session_id }),
-        ),
-        OutboundCommand::Disconnect => return CommandOutcome::Disconnect,
-    };
-
-    let frame = match serialize_request(&id, method, &body) {
-        Ok(f) => f,
-        Err(e) => {
-            log::warn!("ws: serialize {method}: {e}");
-            return CommandOutcome::Continue;
-        }
-    };
-    if ws_tx.send(WsMessage::Text(frame)).await.is_err() {
-        return CommandOutcome::SocketError;
-    }
-    if let Some(reply) = pending {
-        shared.pending.insert(id, PendingRequest { method, reply });
-    }
-    CommandOutcome::Continue
-}
-
-fn to_value<T: serde::Serialize>(v: &T) -> Value {
-    serde_json::to_value(v).unwrap_or(Value::Null)
-}
-
-/// Inbound text-frame dispatcher. Returns `Some(new_state)` if the frame
-/// implies a `ConnectionState` transition the outer loop should announce.
-async fn handle_text_frame(
-    text: &str,
-    shared: &mut SharedState,
-    events: &mpsc::Sender<TransportEvent>,
-    state: &mut ConnectionState,
-) -> Option<ConnectionState> {
-    let env = match RpcEnvelope::parse(text) {
-        Ok(e) => e,
-        Err(e) => {
-            log::warn!("ws: bad json frame: {e}");
-            return None;
-        }
-    };
-    match env {
-        RpcEnvelope::Notification(n) => {
-            handle_notification(&n.method, n.params, shared, events).await;
-            None
-        }
-        RpcEnvelope::Response(r) => match shared.pending.remove(&r.id) {
-            Some(p) => handle_response(p, r.result, events, state),
-            None => {
-                log::warn!("ws: response for unknown id {}", r.id);
-                None
+            if let Some(p) = pending {
+                shared.pending.insert(id, p);
             }
-        },
-        RpcEnvelope::ErrorResponse(er) => {
-            if let Some(id) = er.id.clone() {
-                if let Some(pending) = shared.pending.remove(&id) {
-                    let method = pending.method.to_owned();
-                    fail_pending(pending, er.error.clone());
-                    try_emit(
-                        events,
-                        TransportEvent::RpcError {
-                            request_id: id,
-                            method,
-                            error: er.error,
-                        },
-                    );
-                }
-            } else {
-                log::warn!("ws: error response missing id: {:?}", er.error);
-            }
-            None
-        }
-        RpcEnvelope::Request(req) => {
-            log::warn!("ws: server initiated request {} (ignored)", req.method);
-            None
+            CommandOutcome::Continue
         }
     }
-}
-
-fn handle_response(
-    pending: PendingRequest,
-    result_value: Value,
-    events: &mpsc::Sender<TransportEvent>,
-    state: &mut ConnectionState,
-) -> Option<ConnectionState> {
-    let method = pending.method;
-    match pending.reply {
-        PendingReply::Lifecycle => {
-            match UiRpcResult::from_method_and_result(method, result_value.clone()) {
-                Ok(UiRpcResult::SessionOpen(open)) => {
-                    let caps = Capabilities::parse(&result_value);
-                    try_emit(events, TransportEvent::CapabilityNegotiated(caps));
-                    try_emit(events, TransportEvent::RpcResult(LifecycleResult::SessionOpen(open)));
-                    if !matches!(state, ConnectionState::Live) {
-                        *state = ConnectionState::Live;
-                        return Some(ConnectionState::Live);
-                    }
-                    None
-                }
-                Ok(UiRpcResult::TurnStart(r)) => {
-                    try_emit(events, TransportEvent::RpcResult(LifecycleResult::TurnStart(r)));
-                    None
-                }
-                Ok(UiRpcResult::TurnInterrupt(r)) => {
-                    try_emit(events, TransportEvent::RpcResult(LifecycleResult::TurnInterrupt(r)));
-                    None
-                }
-                Ok(other) => {
-                    log::warn!("ws: lifecycle result unexpected variant: {:?}", other.kind());
-                    None
-                }
-                Err(e) => {
-                    log::warn!("ws: decode lifecycle result for {method}: {e:?}");
-                    None
-                }
-            }
-        }
-        PendingReply::Approval(reply) => {
-            let _ = reply.send(
-                serde_json::from_value::<ApprovalRespondResult>(result_value)
-                    .map_err(|e| RpcError::invalid_params(e.to_string())),
-            );
-            None
-        }
-        PendingReply::DiffPreview(reply) => {
-            let _ = reply.send(
-                serde_json::from_value::<DiffPreviewGetResult>(result_value)
-                    .map_err(|e| RpcError::invalid_params(e.to_string())),
-            );
-            None
-        }
-        PendingReply::TaskOutput(reply) => {
-            let _ = reply.send(
-                serde_json::from_value::<TaskOutputReadResult>(result_value)
-                    .map_err(|e| RpcError::invalid_params(e.to_string())),
-            );
-            None
-        }
-        PendingReply::SessionList => {
-            match serde_json::from_value::<octos_core::ui_protocol::SessionListResult>(
-                result_value,
-            ) {
-                Ok(r) => try_emit(events, TransportEvent::SessionsListed { sessions: r.sessions }),
-                Err(e) => log::warn!("ws: decode session/list result: {e}"),
-            }
-            None
-        }
-        PendingReply::SessionHydrate { session_id } => {
-            // Raw pass-through: the backend decodes `SessionHydrateResult`
-            // (it owns the chat-store routing; keeps the transport thin).
-            try_emit(
-                events,
-                TransportEvent::SessionHydrated { session_id, result: result_value },
-            );
-            None
-        }
-    }
-}
-
-fn fail_pending(pending: PendingRequest, err: RpcError) {
-    match pending.reply {
-        PendingReply::Lifecycle => {} // surfaced as TransportEvent::RpcError
-        PendingReply::Approval(reply) => {
-            let _ = reply.send(Err(err));
-        }
-        PendingReply::DiffPreview(reply) => {
-            let _ = reply.send(Err(err));
-        }
-        PendingReply::TaskOutput(reply) => {
-            let _ = reply.send(Err(err));
-        }
-        // Sidebar hydrate is best-effort; the retry rides the next
-        // `session/open` → `CapabilityNegotiated` → `ListSessions` cycle.
-        PendingReply::SessionList => {}
-        // History hydrate is best-effort too — the user can re-tap the
-        // session row; the error already surfaced as a warn.
-        PendingReply::SessionHydrate { session_id } => {
-            log::warn!("ws: session/hydrate failed for {session_id}: {err:?}");
-        }
-    }
-}
-
-async fn handle_notification(
-    method: &str,
-    params: Value,
-    shared: &mut SharedState,
-    events: &mpsc::Sender<TransportEvent>,
-) {
-    let payload = match UiNotification::from_method_and_params(method, params.clone()) {
-        Ok(p) => p,
-        Err(_) => {
-            log::warn!("ws: unknown notification method '{method}'");
-            return;
-        }
-    };
-    if is_ephemeral_method(method) {
-        try_emit(events, TransportEvent::EphemeralNotification { payload });
-        return;
-    }
-    let cursor = params
-        .get("cursor")
-        .and_then(|v| serde_json::from_value::<UiCursor>(v.clone()).ok());
-    if let Some(c) = cursor.clone() {
-        shared.cursor = Some(c);
-    }
-    emit_durable_notification(events, payload, cursor).await;
 }
 
 /// Sleep on backoff. Returns `true` to retry, `false` if the cumulative
@@ -669,11 +367,5 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("approval.typed.v1, pane.snapshots.v1, session.workspace_cwd.v1, context.lifecycle.v1, state.session_hydrate.v1, auxiliary.rest_to_ws.v1")
         );
-    }
-
-    #[test]
-    fn ephemeral_helper_only_message_delta() {
-        assert!(is_ephemeral_method(methods::MESSAGE_DELTA));
-        assert!(!is_ephemeral_method(methods::TOOL_STARTED));
     }
 }

@@ -55,6 +55,7 @@ async fn live_smoke_session_open_and_turn() {
         workspace_cwd: std::env::current_dir()
             .ok()
             .map(|path| path.to_string_lossy().into_owned()),
+        stdio: None,
     };
 
     eprintln!("smoke: dialing {base_url} as profile={profile}");
