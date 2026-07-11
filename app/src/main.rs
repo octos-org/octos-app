@@ -72,13 +72,26 @@ cache-buster query param bound to a counter, plus a button that increments it \
 — each tap loads a new picture (never put `{{{{state.*}}}}` as the WHOLE url):\n\
     Image{{ src: http_resource(\"https://picsum.photos/400/240?sig={{{{state.count}}}}\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
     Button{{ text: \"New Photo\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
-- HERO PHOTO for place / weather / travel cards: a full-width banner across the \
-TOP makes a card feel like a real iOS app. Use a genuine \
-`images.unsplash.com/photo-<id>` URL of that subject and `ImageFit.CropToFill` \
-so the photo COVERS the banner (fills width, crops overflow, no distortion):\n\
-    Image{{ src: http_resource(\"https://images.unsplash.com/photo-1502602898657-3e91760cbb34?w=640&q=70\") fit: ImageFit.CropToFill width: Fill height: 150 }}\n\
-  (that example URL is Paris / the Eiffel Tower — pick a URL matching the place). \
-Put the title + temperature BELOW the banner.\n\
+- IMMERSIVE FULL-SCREEN WEATHER/PLACE CARD (iOS lock-screen style — the DEFAULT for \
+weather, places, travel): a REAL photo of the place FILLS the whole screen (9:16) \
+with the text overlaid at the bottom over a dark gradient. Use this EXACT structure — \
+an Overlay of image, then dark scrim, then text pinned to the bottom:\n\
+    View{{ width: Fill height: 700 flow: Overlay\n\
+        Image{{ src: http_resource(\"https://loremflickr.com/1080/1920/tokyo,skyline,cityscape\") fit: ImageFit.CropToFill width: Fill height: Fill }}\n\
+        GradientYView{{ width: Fill height: Fill draw_bg.color: #00000000 draw_bg.color_2: #000000E6 }}\n\
+        View{{ width: Fill height: Fill flow: Down align: {{x: 0.0 y: 1.0}} padding: Inset{{left: 28 right: 28 bottom: 64}}\n\
+            Label{{ text: \"Tokyo\" draw_text.color: #ffffff draw_text.text_style.font_size: 26 }}\n\
+            Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 88 margin: Inset{{top: 8 bottom: 4}} }}\n\
+            Label{{ text: \"Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 19 }}\n\
+            Label{{ text: \"H:78°  L:64°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 16 }}\n\
+        }}\n\
+    }}\n\
+  REAL IMAGE: `https://loremflickr.com/1080/1920/<city>,skyline,cityscape` returns a \
+real Flickr photo of that place (comma-separated keywords, url-encoded). Add \
+`?lock=<n>` to lock one stable image (e.g. `.../1080/1920/paris,eiffel?lock=7`). The \
+GradientYView is a dark scrim (transparent top -> dark bottom) so the WHITE text \
+stays readable over ANY photo. Keep `height: 700` (fills the whole screen), and put \
+ALL text in the BOTTOM overlay (align y: 1.0). The hero temperature keeps its margin.\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
 - CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
@@ -805,16 +818,16 @@ script_mod! {
             Assistant := RoundedView {
                 width: Fill
                 height: Fit
-                // Full page width (was right:50 indent). flow: Down so the
-                // copy icon lands BELOW the answer text instead of stacking
-                // over it at top-left (the Overlay bug).
-                margin: Inset{top: 4 bottom: 4 left: 8 right: 8}
-                padding: Inset{left: 12 top: 8 right: 12 bottom: 8}
+                // Edge-to-edge: no bubble margin/padding/background so the A2App
+                // card fills the entire screen (was margin 8 / padding 12 with a
+                // dark bubble bg — that framed the card and broke full-screen).
+                margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
+                padding: Inset{left: 0 top: 0 right: 0 bottom: 0}
                 flow: Down
-                show_bg: true
+                show_bg: false
                 draw_bg +: {
                     color: #x0B2A22E6
-                    radius: 12.0
+                    radius: 0.0
                 }
 
                 RubberView {
@@ -1384,7 +1397,9 @@ script_mod! {
                         height: Fill
                         new_batch: true
                         flow: Right
-                        padding: Inset{left: 16 top: 16 right: 16 bottom: 16}
+                        // Edge-to-edge: no frame inset so the A2App card fills
+                        // the whole screen.
+                        padding: Inset{left: 0 top: 0 right: 0 bottom: 0}
                         spacing: 0
                         draw_bg +: {
                             tint_color: #x0D4035
@@ -1628,11 +1643,9 @@ script_mod! {
                         height: Fill
                         new_batch: true
                         flow: Down
-                        // Minimal padding so the A2App card fills the screen
-                        // (full-screen splash app). Header/footer are hidden and
-                        // the user prompt echo is suppressed in the chat list.
-                        padding: Inset{left: 6 top: 6 right: 6 bottom: 6}
-                        spacing: 12
+                        // Edge-to-edge full-screen card: zero padding.
+                        padding: Inset{left: 0 top: 0 right: 0 bottom: 0}
+                        spacing: 0
                         draw_bg +: {
                             tint_color: #x0B3B31
                             tint_alpha: 0.70
@@ -1804,14 +1817,15 @@ script_mod! {
                         chat_screen := View {
                             width: Fill
                             height: Fill
-                            // Overlay so the composer floats ON TOP of the
-                            // full-screen card. The composer is bottom-anchored
-                            // with a Filler (layout), NOT align — align made the
-                            // input's hit-area register at the top while drawing
-                            // at the bottom, so taps missed it. Its transparent
-                            // upper region passes touches through to the card.
-                            flow: Overlay
-                            spacing: 12
+                            // Down flow: card fills the space, composer docks at
+                            // the bottom. A true Overlay float broke touch routing
+                            // over a FULL-SCREEN card (the PortalList swallowed
+                            // taps meant for the floating pill), so the composer
+                            // docks below the card instead — it still auto-hides
+                            // to the reveal pill, and docking avoids covering the
+                            // card's bottom text.
+                            flow: Down
+                            spacing: 0
 
                         chat_shell := View {
                             width: Fill
@@ -1854,16 +1868,9 @@ script_mod! {
 
                         composer_row := View {
                             width: Fill
-                            // Fill the overlay; a Filler pushes the composer to
-                            // the bottom via layout so its hit-area matches where
-                            // it draws (align-bottom broke input focus).
-                            height: Fill
+                            height: Fit
                             flow: Down
                             align: Align{x: 0.5}
-
-                            // Transparent spacer that occupies everything above
-                            // the composer so touches on the card pass through.
-                            View { width: Fill height: Fill }
 
                             // Toast strip — one auto-dismissing pill for
                             // compaction / memory-saved / warning messages
