@@ -73,42 +73,99 @@ cache-buster query param bound to a counter, plus a button that increments it \
     Image{{ src: http_resource(\"https://picsum.photos/400/240?sig={{{{state.count}}}}\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
     Button{{ text: \"New Photo\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
 - IMMERSIVE FULL-SCREEN iOS WEATHER CARD (the DEFAULT for weather): a REAL photo of \
-the city fills the whole screen; the CURRENT conditions sit in the upper area and a \
-translucent 7-DAY FORECAST panel sits at the bottom — like the real iOS Weather app. \
-Reproduce this EXACT structure (a full-screen Overlay: photo, dark scrim, then a Down \
-column = current block, a Filler, then the forecast panel), substituting real data:\n\
-    SolidView{{ width: Fill height: 700 flow: Overlay new_batch: true draw_bg.color: #000000\n\
-        Image{{ src: http_resource(sys.photo(\"tokyo skyline clear sky\")) fit: ImageFit.Biggest width: Fill height: Fill }}\n\
-        GradientYView{{ width: Fill height: Fill new_batch: true draw_bg.color: #00000022 draw_bg.color_2: #000000DD }}\n\
-        View{{ width: Fill height: Fill flow: Down padding: Inset{{left: 26 top: 34 right: 26 bottom: 14}}\n\
-            Label{{ text: \"Tokyo\" draw_text.color: #ffffff draw_text.text_style.font_size: 26 }}\n\
-            Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 56 margin: Inset{{top: 0 bottom: 0}} }}\n\
+the city fills the whole screen; the CURRENT conditions sit at the top, a frosted \
+6-TILE DETAIL GRID (air quality, UV, sunrise, sunset, humidity, wind) sits in the \
+middle, and a translucent FORECAST panel sits at the bottom — like a refined iOS \
+Weather app. Reproduce this EXACT structure (a full-screen Overlay: photo, dark scrim, \
+then a Down column = current block, the detail grid, then the forecast \
+panel), substituting real, plausible data:\n\
+    SolidView{{ width: Fill height: 880 flow: Overlay new_batch: true draw_bg.color: #000000\n\
+        Image{{ src: http_resource(sys.photo(\"tokyo skyline clear sky\")) fit: ImageFit.CropToFill width: Fill height: Fill }}\n\
+        GradientYView{{ width: Fill height: Fill new_batch: true draw_bg.color: #00000022 draw_bg.color_2: #000000EE }}\n\
+        View{{ width: Fill height: Fill flow: Down padding: Inset{{left: 22 top: 6 right: 22 bottom: 8}} spacing: 2\n\
+            Label{{ text: \"Tokyo\" draw_text.color: #ffffff draw_text.text_style.font_size: 30 }}\n\
+            Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 50 margin: Inset{{top: 2 bottom: 0}} }}\n\
             Label{{ text: \"☀️  Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 18 }}\n\
-            Label{{ text: \"H:78°   L:64°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 15 }}\n\
-            Filler{{}}\n\
-            RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 new_batch: true padding: Inset{{left: 16 top: 8 right: 16 bottom: 8}} draw_bg.color: #00000055 draw_bg.border_radius: 22.0\n\
-                SolidView{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 5 bottom: 5}} draw_bg.color: #00000000\n\
-                    Label{{ width: 100 text: \"Today\" draw_text.color: #ffffff draw_text.text_style.font_size: 16 }}\n\
-                    Label{{ width: 44 text: \"☀️\" draw_text.text_style.font_size: 20 }}\n\
-                    Filler{{}}\n\
-                    Label{{ text: \"64°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 16 }}\n\
-                    Label{{ width: 58 text: \"78°\" draw_text.color: #ffffff draw_text.text_style.font_size: 16 }}\n\
+            Label{{ text: \"H:78°   L:64°   Feels 74°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 14 }}\n\
+            View{{ width: Fill height: Fit flow: Down spacing: 2\n\
+                View{{ width: Fill height: Fit flow: Right spacing: 8\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                        Label{{ text: \"AIR QUALITY\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
+                        Label{{ text: \"42\" draw_text.color: #32d74b draw_text.text_style.font_size: 20 }}\n\
+                        Label{{ text: \"Good\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
+                    }}\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                        Label{{ text: \"UV INDEX\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
+                        Label{{ text: \"5\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
+                        Label{{ text: \"Moderate\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
+                    }}\n\
                 }}\n\
-                // …repeat that SolidView row for the next 6 days (Mon, Tue, …), each \
-with its own weather emoji and lo/hi. 7 rows total.\n\
+                View{{ width: Fill height: Fit flow: Right spacing: 8\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                        Label{{ text: \"SUNRISE\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
+                        Label{{ text: \"5:42 AM\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
+                        Label{{ text: \"🌅 Dawn\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
+                    }}\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                        Label{{ text: \"SUNSET\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
+                        Label{{ text: \"6:58 PM\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
+                        Label{{ text: \"🌇 Dusk\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
+                    }}\n\
+                }}\n\
+                View{{ width: Fill height: Fit flow: Right spacing: 8\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                        Label{{ text: \"HUMIDITY\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
+                        Label{{ text: \"64%\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
+                        Label{{ text: \"Dew point 58°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
+                    }}\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                        Label{{ text: \"WIND\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
+                        Label{{ text: \"8 mph\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
+                        Label{{ text: \"NW\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
+                    }}\n\
+                }}\n\
+            }}\n\
+            RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 new_batch: true padding: Inset{{left: 16 top: 3 right: 16 bottom: 3}} draw_bg.color: #00000055 draw_bg.border_radius: 20.0\n\
+                SolidView{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 3 bottom: 3}} draw_bg.color: #00000000\n\
+                    Label{{ width: 96 text: \"Today\" draw_text.color: #ffffff draw_text.text_style.font_size: 15 }}\n\
+                    Label{{ width: 40 text: \"☀️\" draw_text.text_style.font_size: 19 }}\n\
+                    Filler{{}}\n\
+                    Label{{ text: \"64°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 15 }}\n\
+                    Label{{ width: 54 text: \"78°\" draw_text.color: #ffffff draw_text.text_style.font_size: 15 }}\n\
+                }}\n\
+                // …repeat that SolidView row for 2 days total (Today, then Mon), each \
+with its own weather emoji and lo/hi.\n\
             }}\n\
         }}\n\
     }}\n\
-  RULES: the ROOT Overlay container and the Image MUST have NO `padding` and NO \
+  RULES: the background Image MUST use `fit: ImageFit.CropToFill` (fills the whole \
+box, cropping overflow — a true edge-to-edge photo). NEVER use Smallest/Biggest/\
+Vertical/Horizontal on it: those size the photo to its own aspect and leave bare \
+letterbox bands. The ROOT Overlay container and the Image MUST have NO `padding` and NO \
 `margin` — an Overlay child's Fill height = parent height MINUS parent padding MINUS \
 its own margin, so ANY inset there SHRINKS the photo and exposes bare background. Put \
-ALL insets (the top: 34 status-bar clearance, side and bottom padding) ONLY on the \
-inner `flow: Down` text column, exactly as in the template. Current block (city, big \
-temp, `emoji + condition`, H/L) at the TOP; `Filler{{}}` pushes the forecast to the \
-BOTTOM. The forecast is a translucent RoundedView with ONE SolidView row per day: day \
-name (left), a weather EMOJI (☀️ sunny, ⛅ partly, ☁️ cloudy, 🌧️ rain, ⛈️ storm, \
-❄️ snow), then a Filler, then lo° (dim) and hi° (white) on the right. Give 7 rows. \
-Image: `sys.photo(\"<city> <scene/weather>\")`.\n\
+ALL insets (the top: 44 status-bar clearance, side and bottom padding) ONLY on the \
+inner `flow: Down` column, exactly as in the template. STRUCTURE top-to-bottom: (1) a \
+CURRENT block — city (font 30), the hero temperature ALONE on its line (font 60, \
+`margin: Inset{{top: 6 bottom: 0}}` so its tall glyphs are not clipped), \
+`emoji + condition` (font 19), then `H:__°   L:__°   Feels __°` (font 15, #ffffffcc); \
+(2) a DETAIL GRID packed directly under the current block (fill top-to-bottom, NO \
+Filler) — a `flow: Down` View of THREE `flow: Right` rows, \
+each holding TWO equal frosted tiles (`width: Fill`). Every tile is a RoundedView \
+(draw_bg.color #ffffff1f, border_radius 18) stacking an UPPERCASE caption (font 11, \
+#ffffff99), a big value (font 20), and a sub-line (font 12, #ffffffcc). The SIX tiles in \
+order: AIR QUALITY (value = the AQI NUMBER; set its `draw_text.color` by category — \
+Good #32d74b, Moderate #ffd60a, Unhealthy #ff9f0a, Very Unhealthy #ff453a — and put the \
+category word in the sub-line), UV INDEX (a 0–11 value; sub Low/Moderate/High/Very High), \
+SUNRISE (a clock time; sub `🌅 Dawn`), SUNSET (a clock time; sub `🌇 Dusk`), HUMIDITY \
+(a percent; sub `Dew point __°`), WIND (e.g. `8 mph`; sub the compass direction like \
+`NW`); (3) a FORECAST — a translucent RoundedView (draw_bg.color #00000055, \
+border_radius 20) with ONE SolidView row per day: day name width 96 (font 15), a weather \
+EMOJI width 40 (☀️ sunny, ⛅ partly, ☁️ cloudy, 🌧️ rain, ⛈️ storm, ❄️ snow), a Filler, \
+then lo° dim (#ffffff88) and hi° white width 54, all font 15. Give 2 rows. The WHOLE \
+inner column MUST fit ONE screen (~880dp) with NO scroll and NO clipping — prefer tight \
+spacing over overflow. Image: `sys.photo(\"<city> <scene/weather>\")` matching the actual \
+conditions.\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
 - CRITICAL OVERRIDE (takes precedence over the manual's `let` examples): the \
@@ -204,6 +261,104 @@ fn neutralize_bare_view(body: &str) -> String {
     }
     out.push_str(&body[last..]);
     out
+}
+
+/// Force every full-bleed background `Image` (one sized `height: Fill`) to
+/// `fit: ImageFit.CropToFill`. In `flow: Overlay`, `ImageFit.Biggest`/`.Smallest`
+/// size the image's walk from a mis-resolved available height — an Overlay+Fill
+/// child peeks a too-short height — so the photo renders shorter than its box and
+/// letterboxes, exposing bare backing that reads as RED bands on this device.
+/// `CropToFill` keeps the quad at the full box and crops via UV coords, so the
+/// photo always covers edge-to-edge regardless of the peeked height. Saved cards
+/// authored before this rule — and an LLM that reproduces them verbatim — still
+/// carry the old fit, so enforce it at render time rather than trusting the DSL.
+fn force_fullbleed_image_fit(body: &str) -> String {
+    if !body.contains("Image{") {
+        return body.to_string();
+    }
+    // Pin the full-screen card root to the same height as the background image.
+    // The immersive template's Overlay root is `height: 700`; a background image
+    // TALLER than its container (the old `height: 920`) is mis-positioned by the
+    // Overlay and leaves a red strip above the photo. Matching root == image so
+    // the image fills the container exactly removes the offset.
+    let body = body.replace("height: 700", &format!("height: {FULLBLEED_CARD_HEIGHT}"));
+    let body = body.as_str();
+    let bytes = body.as_bytes();
+    let mut out = String::with_capacity(body.len() + 32);
+    let mut i = 0;
+    while i < body.len() {
+        let rel = match body[i..].find("Image{") {
+            Some(r) => r,
+            None => {
+                out.push_str(&body[i..]);
+                break;
+            }
+        };
+        let start = i + rel;
+        let brace = start + "Image".len(); // index of the '{'
+        let part_of_name = start > 0 && bytes[start - 1].is_ascii_alphanumeric();
+        // Find the matching close brace for this Image{ … } (props may nest
+        // `Inset{…}`, `vec2(…)`, etc., so count depth).
+        let mut depth = 0i32;
+        let mut j = brace;
+        while j < body.len() {
+            match bytes[j] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if part_of_name || j >= body.len() {
+            // `…Image{` is a longer identifier, or braces are unbalanced — copy
+            // through the brace and keep scanning.
+            out.push_str(&body[i..brace + 1]);
+            i = brace + 1;
+            continue;
+        }
+        let inner = &body[brace + 1..j];
+        let full_bleed = inner.contains("height: Fill") || inner.contains("height:Fill");
+        out.push_str(&body[i..brace + 1]); // up to and including the '{'
+        if full_bleed {
+            out.push_str(&rewrite_image_fit_crop(inner));
+        } else {
+            out.push_str(inner);
+        }
+        out.push('}');
+        i = j + 1;
+    }
+    out
+}
+
+/// Guarantee a full-bleed Image actually covers its box: force `CropToFill`
+/// (crop-to-cover, never contain) AND replace `height: Fill` with a fixed
+/// full-screen height. `height: Fill` on the FIRST child of a `flow: Overlay`
+/// container resolves to a too-short intrinsic height (~500dp) and Overlay then
+/// CENTERS the image, leaving equal letterbox gaps top and bottom that expose
+/// bare (red) backing. A fixed height ≥ the screen makes the quad span the whole
+/// card, so the photo is truly edge-to-edge and nothing shows through.
+/// Fixed height (Makepad logical units) for a full-screen card root and its
+/// background image — sized to fill this device's viewport. Root and image share
+/// it so the Overlay image covers the card exactly (no offset, no letterbox).
+const FULLBLEED_CARD_HEIGHT: u32 = 880;
+const FULLBLEED_IMAGE_HEIGHT: &str = "height: 880";
+fn rewrite_image_fit_crop(inner: &str) -> String {
+    let mut s = inner.to_string();
+    for v in ["Biggest", "Smallest", "Vertical", "Horizontal", "Stretch", "Size"] {
+        s = s.replace(&format!("ImageFit.{v}"), "ImageFit.CropToFill");
+    }
+    if !s.contains("ImageFit.") {
+        s = format!(" fit: ImageFit.CropToFill{s}");
+    }
+    s = s
+        .replace("height: Fill", FULLBLEED_IMAGE_HEIGHT)
+        .replace("height:Fill", FULLBLEED_IMAGE_HEIGHT);
+    s
 }
 
 /// Substitute `{{state.<key>}}` tokens with this card's live values. Missing
@@ -331,7 +486,8 @@ fn substitute_card_state(body: &str, item_id: usize, state: &CardState) -> Strin
     let named = strip_card_name_line(body);
     let subst = substitute_state_keys(&named, state);
     let safe = neutralize_bare_view(&subst);
-    tag_notify_calls(&safe, item_id)
+    let fitted = force_fullbleed_image_fit(&safe);
+    tag_notify_calls(&fitted, item_id)
 }
 
 /// Whole-message variant: substitute `{{state.*}}` and tag notify calls ONLY
@@ -359,7 +515,17 @@ fn resolve_a2app_card(text: &str, item_id: usize, state: &CardState) -> String {
         // push below).
         match body_and_rest.find("```") {
             Some(close) => {
-                out.push_str(&substitute_card_state(&body_and_rest[..close], item_id, state));
+                let sub = substitute_card_state(&body_and_rest[..close], item_id, state);
+                out.push_str(&sub);
+                // Keep the closing ``` on its own line. strip_card_name_line's
+                // lines()+join("\n") drops the body's trailing newline, which
+                // would glue the fence onto the DSL's last brace ("}```"). That
+                // is not a valid CommonMark closing fence, so pulldown-cmark
+                // leaves the code block open to EOF — the Splash eval only
+                // tolerates the trailing "```" by luck. Re-add the newline.
+                if !sub.ends_with('\n') {
+                    out.push('\n');
+                }
                 rest = &body_and_rest[close..];
             }
             None => {
@@ -846,9 +1012,15 @@ script_mod! {
                 margin: Inset{top: 0 bottom: 0 left: 0 right: 0}
                 padding: Inset{left: 0 top: 0 right: 0 bottom: 0}
                 flow: Down
-                show_bg: false
+                // OPAQUE BLACK backing for the whole card item. A full-screen
+                // A2App card is a translucent scrim over a photo; wherever the
+                // photo doesn't cover (an offset above the image, a not-yet-
+                // loaded texture), the scrim would otherwise reveal the
+                // uninitialized Android surface as BRIGHT RED. An opaque black
+                // bubble guarantees those regions read black, not red.
+                show_bg: true
                 draw_bg +: {
-                    color: #x0B2A22E6
+                    color: #x000000FF
                     radius: 0.0
                 }
 
@@ -1410,8 +1582,14 @@ script_mod! {
                 // pixel no opaque widget covers shows the uninitialized Android
                 // surface, which reads as BRIGHT RED on this device — seen as
                 // red bands wherever a generated card didn't fully cover.
+                // window.transparent MUST be false on Android: a transparent
+                // window forces the EGL clear alpha to 0, so the opaque
+                // clear_color below is ignored and the status-bar / notch
+                // safe-area strip (no opaque widget covers it) shows the
+                // uninitialized surface as a RED band. Transparency was only
+                // needed for the macOS backdrop blur, which is disabled.
                 pass.clear_color: #000000FF
-                window.transparent: true
+                window.transparent: false
                 // window.backdrop: WindowBackdrop.Blur — disabled until
                 // platform bug fixed in macos_window.rs:532 (addSubview
                 // positioned arg must be NSWindowBelow/-1 or NSWindowAbove/1,
@@ -1859,6 +2037,16 @@ script_mod! {
                             // card's bottom text.
                             flow: Down
                             spacing: 0
+                            // OPAQUE BLACK backing for the whole chat area. The
+                            // full-screen card is pinned lower than the viewport
+                            // top (a collapsed prior message still reserves a
+                            // slot); without an opaque backing that gap samples
+                            // the uninitialized compositor surface as BRIGHT RED.
+                            // Black guarantees any uncovered strip reads black.
+                            show_bg: true
+                            draw_bg +: {
+                                color: #x000000FF
+                            }
 
                         chat_shell := View {
                             width: Fill
@@ -3243,6 +3431,21 @@ impl App {
         if text.trim().is_empty() {
             return;
         }
+        // Clear the Makepad composer's own input. On Android the visible
+        // composer is the native floating overlay (which clears itself); this
+        // clears the hidden Makepad TextInput on desktop.
+        input.set_text(cx, "");
+        self.submit_prompt(cx, text);
+    }
+
+    /// Send `text` through the octos agent, reusing the splash-mode wrapping,
+    /// saved-card injection, streaming state and list scroll. Both the Makepad
+    /// composer (`send_message`) and the native Android floating composer
+    /// (`AndroidComposerSubmit`, routed from `handle_actions`) land here.
+    fn submit_prompt(&mut self, cx: &mut Cx, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
 
         if self.agent.is_none() || self.session_id.is_none() {
             return;
@@ -3259,7 +3462,6 @@ impl App {
             data.is_streaming = true;
             data.messages.len() + 1
         };
-        input.set_text(cx, "");
         self.update_empty_state_visibility(cx);
 
         let session_id = self.session_id.unwrap();
@@ -3291,7 +3493,11 @@ impl App {
                 let mut lib = String::from(
                     "\n\nYOUR SAVED CARDS — if this request refines/improves/changes one of \
 these, edit that card and return the FULL updated block KEEPING its exact \
-`// name:` line:\n",
+`// name:` line. NOTE: some saved cards are OLDER, simpler versions — for a \
+WEATHER card you MUST reproduce the FULL current template shown above (the \
+frosted AIR QUALITY / UV / SUNRISE / SUNSET / HUMIDITY / WIND detail grid AND \
+the `Feels __°` in the H/L line), UPGRADING an older saved card to that richer \
+structure rather than copying its simpler layout verbatim:\n",
                 );
                 for (name, dsl) in &saved {
                     lib.push_str(&format!("\n[{name}]\n```runsplash\n{}\n```\n", dsl.trim()));
@@ -3339,10 +3545,27 @@ these, edit that card and return the FULL updated block KEEPING its exact \
     /// full screen. A full redraw is required after flipping glass-composite
     /// visibility or the old composite lingers (see [[octos-app-android]]).
     fn sync_composer(&mut self, cx: &mut Cx) {
-        let show = self.composer_shown;
-        self.ui.widget(cx, ids!(composer)).set_visible(cx, show);
-        self.ui.button(cx, ids!(reveal_pill)).set_visible(cx, !show);
-        cx.redraw_all();
+        #[cfg(target_os = "android")]
+        {
+            // The native floating composer overlay replaces the Makepad docked
+            // composer + reveal pill on Android. Keep both Makepad widgets
+            // hidden and let the native overlay (driven via Cx) float over the
+            // full-screen card. `composer_shown` no longer gates visibility —
+            // the native composer stays up so it floats over every card, which
+            // is the whole point (edge-to-edge card, composer on top).
+            let _ = self.composer_shown;
+            self.ui.widget(cx, ids!(composer)).set_visible(cx, false);
+            self.ui.button(cx, ids!(reveal_pill)).set_visible(cx, false);
+            cx.show_android_composer();
+            cx.redraw_all();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let show = self.composer_shown;
+            self.ui.widget(cx, ids!(composer)).set_visible(cx, show);
+            self.ui.button(cx, ids!(reveal_pill)).set_visible(cx, !show);
+            cx.redraw_all();
+        }
     }
 
     /// Status label content. W01 will rewrite this to show `Connected ·
@@ -3529,6 +3752,16 @@ these, edit that card and return the FULL updated block KEEPING its exact \
         self.ui
             .view(cx, ids!(content_screen))
             .set_visible(cx, is_content);
+        // The native Android floating composer belongs to the chat screen —
+        // hide it while the content browser is up so it doesn't float over it.
+        #[cfg(target_os = "android")]
+        {
+            if is_chat {
+                cx.show_android_composer();
+            } else {
+                cx.hide_android_composer();
+            }
+        }
         self.ui.redraw(cx);
     }
 
@@ -4256,6 +4489,19 @@ impl MatchEvent for App {
             self.cancel_request(cx);
         }
 
+        // Native Android floating composer submit → the same send path as the
+        // Makepad composer (splash-mode wrapping, saved cards, streaming). The
+        // action is posted from the platform's `onComposerSubmit` JNI callback
+        // (see `android.rs::handle_message`). Never fires off Android.
+        for action in actions {
+            if let Some(sub) = action
+                .downcast_ref::<makepad_widgets::makepad_platform::event::AndroidComposerSubmit>()
+            {
+                let text = sub.text.clone();
+                self.submit_prompt(cx, text);
+            }
+        }
+
         // ---- W08 — LoginScreen buttons + Sign out -------------------------
         if self.ui.button(cx, ids!(login_continue_button)).clicked(actions) {
             self.login_continue_clicked(cx);
@@ -4833,6 +5079,11 @@ impl MatchEvent for App {
         }
         // Phone boot: land on the chat surface, not the menu — ☰ opens it.
         self.collapse_sidebar_if_narrow(cx);
+        // Settle composer visibility now (not only via the auth→clear_chat
+        // path): on Android this hides the Makepad docked composer and raises
+        // the native floating overlay, so an unauthed boot doesn't briefly show
+        // both. On desktop it just reflects `composer_shown` (true at boot).
+        self.sync_composer(cx);
     }
 }
 
