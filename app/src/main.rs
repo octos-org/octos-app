@@ -73,12 +73,13 @@ cache-buster query param bound to a counter, plus a button that increments it \
     Image{{ src: http_resource(\"https://picsum.photos/400/240?sig={{{{state.count}}}}\") fit: ImageFit.Smallest width: Fill height: 180 }}\n\
     Button{{ text: \"New Photo\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
 - IMMERSIVE FULL-SCREEN iOS WEATHER CARD (the DEFAULT for weather): a REAL photo of \
-the city fills the whole screen; the CURRENT conditions sit at the top, a frosted \
-6-TILE DETAIL GRID (air quality, UV, sunrise, sunset, humidity, wind) sits in the \
-middle, and a translucent FORECAST panel sits at the bottom — like a refined iOS \
+the city fills the whole screen; the CURRENT conditions sit at the top, a translucent \
+7-DAY FORECAST panel sits directly below them, then a MAPS ROW with a LIVE 卫星云图 \
+(satellite cloud-map) and a LIVE 空气质量图 (air-quality map) side by side, then a frosted \
+6-TILE DETAIL GRID (air quality, UV, sunrise, sunset, humidity, wind) — like a refined iOS \
 Weather app. Reproduce this EXACT structure (a full-screen Overlay: photo, dark scrim, \
-then a Down column = current block, the detail grid, then the forecast \
-panel), substituting real, plausible data:\n\
+then a Down column = current block, the 7-day forecast, the maps row, then the detail \
+grid), substituting real, plausible data:\n\
     SolidView{{ width: Fill height: 880 flow: Overlay new_batch: true draw_bg.color: #000000\n\
         Image{{ src: http_resource(sys.photo(\"tokyo skyline clear sky\")) fit: ImageFit.CropToFill width: Fill height: Fill }}\n\
         GradientYView{{ width: Fill height: Fill new_batch: true draw_bg.color: #00000022 draw_bg.color_2: #000000EE }}\n\
@@ -87,6 +88,37 @@ panel), substituting real, plausible data:\n\
             Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 50 margin: Inset{{top: 2 bottom: 0}} }}\n\
             Label{{ text: \"☀️  Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 18 }}\n\
             Label{{ text: \"H:78°   L:64°   Feels 74°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 14 }}\n\
+            RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 new_batch: true padding: Inset{{left: 16 top: 2 right: 16 bottom: 2}} draw_bg.color: #00000055 draw_bg.border_radius: 20.0\n\
+                SolidView{{ width: Fill height: 30 flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 0 bottom: 0}} draw_bg.color: #00000000\n\
+                    Label{{ width: 92 text: \"Today\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
+                    Label{{ width: 34 text: \"☀️\" draw_text.text_style.font_size: 16 }}\n\
+                    Filler{{}}\n\
+                    Label{{ text: \"64°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 14 }}\n\
+                    Label{{ width: 48 text: \"78°\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
+                }}\n\
+                SolidView{{ width: Fill height: 30 flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 0 bottom: 0}} draw_bg.color: #00000000\n\
+                    Label{{ width: 92 text: \"Mon\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
+                    Label{{ width: 34 text: \"⛅\" draw_text.text_style.font_size: 16 }}\n\
+                    Filler{{}}\n\
+                    Label{{ text: \"61°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 14 }}\n\
+                    Label{{ width: 48 text: \"75°\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
+                }}\n\
+                // …repeat that SolidView row for 7 DAYS total (Today, then the next six \
+day names Tue Wed Thu Fri Sat Sun), each with its own weather emoji and lo/hi.\n\
+            }}\n\
+            View{{ width: Fill height: Fit flow: Right spacing: 8\n\
+                RoundedView{{ width: Fill height: Fit flow: Down spacing: 3 new_batch: true padding: Inset{{left: 6 top: 6 right: 6 bottom: 6}} draw_bg.color: #000000aa draw_bg.border_radius: 16.0\n\
+                    Image{{ src: http_resource(sys.satellite()) fit: ImageFit.Smallest width: Fill height: 108 }}\n\
+                    Label{{ text: \"卫星云图\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 11 }}\n\
+                }}\n\
+                RoundedView{{ width: Fill height: Fit flow: Down spacing: 3 new_batch: true padding: Inset{{left: 6 top: 6 right: 6 bottom: 6}} draw_bg.color: #000000aa draw_bg.border_radius: 16.0\n\
+                    View{{ width: Fill height: 108 flow: Overlay\n\
+                        Image{{ src: http_resource(sys.basemap(35.68, 139.65)) fit: ImageFit.CropToFill width: Fill height: 108 }}\n\
+                        Image{{ src: http_resource(sys.airmap(35.68, 139.65)) fit: ImageFit.CropToFill width: Fill height: 108 }}\n\
+                    }}\n\
+                    Label{{ text: \"空气质量图\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 11 }}\n\
+                }}\n\
+            }}\n\
             View{{ width: Fill height: Fit flow: Down spacing: 2\n\
                 View{{ width: Fill height: Fit flow: Right spacing: 8\n\
                     RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
@@ -125,17 +157,6 @@ panel), substituting real, plausible data:\n\
                     }}\n\
                 }}\n\
             }}\n\
-            RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 new_batch: true padding: Inset{{left: 16 top: 3 right: 16 bottom: 3}} draw_bg.color: #00000055 draw_bg.border_radius: 20.0\n\
-                SolidView{{ width: Fill height: Fit flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 3 bottom: 3}} draw_bg.color: #00000000\n\
-                    Label{{ width: 96 text: \"Today\" draw_text.color: #ffffff draw_text.text_style.font_size: 15 }}\n\
-                    Label{{ width: 40 text: \"☀️\" draw_text.text_style.font_size: 19 }}\n\
-                    Filler{{}}\n\
-                    Label{{ text: \"64°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 15 }}\n\
-                    Label{{ width: 54 text: \"78°\" draw_text.color: #ffffff draw_text.text_style.font_size: 15 }}\n\
-                }}\n\
-                // …repeat that SolidView row for 2 days total (Today, then Mon), each \
-with its own weather emoji and lo/hi.\n\
-            }}\n\
         }}\n\
     }}\n\
   RULES: the background Image MUST use `fit: ImageFit.CropToFill` (fills the whole \
@@ -149,8 +170,25 @@ inner `flow: Down` column, exactly as in the template. STRUCTURE top-to-bottom: 
 CURRENT block — city (font 30), the hero temperature ALONE on its line (font 60, \
 `margin: Inset{{top: 6 bottom: 0}}` so its tall glyphs are not clipped), \
 `emoji + condition` (font 19), then `H:__°   L:__°   Feels __°` (font 15, #ffffffcc); \
-(2) a DETAIL GRID packed directly under the current block (fill top-to-bottom, NO \
-Filler) — a `flow: Down` View of THREE `flow: Right` rows, \
+(2) a 7-DAY FORECAST directly under the current block (this comes BEFORE the detail \
+grid) — a translucent RoundedView (draw_bg.color #00000055, border_radius 20) with ONE \
+SolidView row per day, EACH ROW a FIXED `height: 30` (keeps the emoji rows compact and \
+uniform): day name width 92 (font 14), a weather EMOJI width 34 (☀️ sunny, \
+⛅ partly, ☁️ cloudy, 🌧️ rain, ⛈️ storm, ❄️ snow), a Filler, then lo° dim (#ffffff88) and \
+hi° white width 48, all font 14. Give SEVEN rows: Today, then the next six days by name; \
+(3) a MAPS ROW — a `flow: Right` View (spacing 8) of TWO equal (`width: Fill`) rounded \
+tiles side by side, each a RoundedView (draw_bg.color #000000aa, border_radius 16, \
+flow: Down): the LEFT tile is the LIVE 卫星云图 satellite — `Image{{ src: \
+http_resource(sys.satellite()) fit: ImageFit.Smallest width: Fill height: 108 }}` \
+(sys.satellite() takes NO argument) + a `卫星云图` caption (font 11, #ffffffcc); the RIGHT \
+tile is the LIVE 空气质量图 air-quality map — a `height: 108 flow: Overlay` View stacking \
+`Image{{ src: http_resource(sys.basemap(LAT, LON)) fit: ImageFit.CropToFill width: Fill \
+height: 108 }}` UNDER `Image{{ src: http_resource(sys.airmap(LAT, LON)) fit: \
+ImageFit.CropToFill width: Fill height: 108 }}` (fixed height, NOT Fill — Fill inside an \
+Overlay wrongly resolves to the whole card) — pass the CITY's real decimal LAT, LON \
+(e.g. Tokyo 35.68, 139.65; both maps take the SAME lat/lon) — + a `空气质量图` caption \
+(font 11, #ffffffcc); (4) a DETAIL GRID below the maps row — a `flow: Down` View \
+of THREE `flow: Right` rows, \
 each holding TWO equal frosted tiles (`width: Fill`). Every tile is a RoundedView \
 (draw_bg.color #ffffff1f, border_radius 18) stacking an UPPERCASE caption (font 11, \
 #ffffff99), a big value (font 20), and a sub-line (font 12, #ffffffcc). The SIX tiles in \
@@ -159,10 +197,7 @@ Good #32d74b, Moderate #ffd60a, Unhealthy #ff9f0a, Very Unhealthy #ff453a — an
 category word in the sub-line), UV INDEX (a 0–11 value; sub Low/Moderate/High/Very High), \
 SUNRISE (a clock time; sub `🌅 Dawn`), SUNSET (a clock time; sub `🌇 Dusk`), HUMIDITY \
 (a percent; sub `Dew point __°`), WIND (e.g. `8 mph`; sub the compass direction like \
-`NW`); (3) a FORECAST — a translucent RoundedView (draw_bg.color #00000055, \
-border_radius 20) with ONE SolidView row per day: day name width 96 (font 15), a weather \
-EMOJI width 40 (☀️ sunny, ⛅ partly, ☁️ cloudy, 🌧️ rain, ⛈️ storm, ❄️ snow), a Filler, \
-then lo° dim (#ffffff88) and hi° white width 54, all font 15. Give 2 rows. The WHOLE \
+`NW`). The WHOLE \
 inner column MUST fit ONE screen (~880dp) with NO scroll and NO clipping — prefer tight \
 spacing over overflow. Image: `sys.photo(\"<city> <scene/weather>\")` matching the actual \
 conditions.\n\
@@ -3494,10 +3529,14 @@ impl App {
                     "\n\nYOUR SAVED CARDS — if this request refines/improves/changes one of \
 these, edit that card and return the FULL updated block KEEPING its exact \
 `// name:` line. NOTE: some saved cards are OLDER, simpler versions — for a \
-WEATHER card you MUST reproduce the FULL current template shown above (the \
-frosted AIR QUALITY / UV / SUNRISE / SUNSET / HUMIDITY / WIND detail grid AND \
-the `Feels __°` in the H/L line), UPGRADING an older saved card to that richer \
-structure rather than copying its simpler layout verbatim:\n",
+WEATHER card you MUST reproduce the FULL current template shown above in this \
+EXACT order: current block, then the 7-DAY FORECAST panel (each row a FIXED height 30), \
+then a MAPS ROW of two side-by-side tiles — the LIVE 卫星云图 satellite \
+(http_resource(sys.satellite())) and the LIVE 空气质量图 air-quality map (an Overlay of \
+http_resource(sys.basemap(LAT, LON)) under http_resource(sys.airmap(LAT, LON)) using the \
+city's real lat/lon) — then the frosted AIR QUALITY / UV / SUNRISE / SUNSET / HUMIDITY / \
+WIND detail grid, plus the `Feels __°` in the H/L line — UPGRADING an older saved card to \
+that richer structure AND order rather than copying its simpler/old-order layout verbatim:\n",
                 );
                 for (name, dsl) in &saved {
                     lib.push_str(&format!("\n[{name}]\n```runsplash\n{}\n```\n", dsl.trim()));
