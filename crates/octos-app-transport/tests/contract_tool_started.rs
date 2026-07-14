@@ -51,6 +51,7 @@ async fn tool_started_arrives_as_durable_notification() {
         bearer: SecretString::new("tk-1"),
         profile_id: ProfileId::new("p1"),
         cursor: None,
+        cursor_file: None,
         requested_capabilities: Capabilities::requested(),
         workspace_cwd: Some("/tmp".to_owned()),
         stdio: None,

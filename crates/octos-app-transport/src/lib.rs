@@ -98,6 +98,10 @@ pub struct TransportConfig {
     pub profile_id: ProfileId,
     /// Last-applied cursor; `None` means "subscribe live, no replay".
     pub cursor: Option<UiCursor>,
+    /// When set, per-session replay cursors are persisted to this JSON file via
+    /// [`cursor::FileCursorPersist`], so they survive a transport re-spawn / app
+    /// restart (W08/W04). `None` = in-memory only (cursors reset on reconnect).
+    pub cursor_file: Option<std::path::PathBuf>,
     pub requested_capabilities: Capabilities,
     /// Per-session workspace cwd to request during `session/open`.
     pub workspace_cwd: Option<String>,

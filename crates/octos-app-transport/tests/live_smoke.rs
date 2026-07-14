@@ -51,6 +51,7 @@ async fn live_smoke_session_open_and_turn() {
         bearer: SecretString::new(token),
         profile_id: ProfileId::new(&profile),
         cursor: None,
+        cursor_file: None,
         requested_capabilities: Capabilities::requested(),
         workspace_cwd: std::env::current_dir()
             .ok()

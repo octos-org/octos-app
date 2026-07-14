@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 use makepad_widgets::*;
+use crate::fpath;
 use octos_app_store::approvals::ApprovalState;
 use octos_core::ui_protocol::{
     approval_kinds, ApprovalDecision, ApprovalId, ApprovalRequestedEvent,
@@ -153,18 +154,18 @@ script_mod! {
             draw_text +: {
                 text_style: theme.font_code{
                     font_family: FontFamily{
-                        latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                        chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                        emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                        latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                        chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                        emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                     }
                 }
             }
             draw_gutter +: {
                 text_style: theme.font_code{
                     font_family: FontFamily{
-                        latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                        chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                        emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                        latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                        chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                        emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                     }
                 }
             }

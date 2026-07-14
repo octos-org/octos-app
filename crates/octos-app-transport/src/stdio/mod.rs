@@ -121,7 +121,11 @@ async fn run_child(
         });
     }
 
-    let mut shared = SharedState::new(cfg.cursor.clone());
+    let persist = cfg.cursor_file.clone().map(|p| {
+        std::sync::Arc::new(crate::cursor::FileCursorPersist::new(p))
+            as std::sync::Arc<dyn crate::cursor::CursorPersist>
+    });
+    let mut shared = SharedState::new(cfg.cursor.clone(), persist);
     let mut state = ConnectionState::Handshaking;
     try_emit(&events, TransportEvent::ConnectionState(ConnectionState::Handshaking));
 

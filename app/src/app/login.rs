@@ -25,6 +25,7 @@
 //! `04-IA-AND-NAVIGATION.md` § "LoginScreen" for the design.
 
 use makepad_widgets::*;
+use crate::fpath;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -60,10 +61,10 @@ script_mod! {
                 line_spacing: theme.font_wdgt_line_spacing
                 font_size: 13
                 font_family: FontFamily {
-                    latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                    symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                    latin := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                    chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                    symbols := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                 }
             }
         }
@@ -333,6 +334,102 @@ pub fn apply_provision_string(prov: &str) -> Result<(), String> {
             .map_err(|e| format!("provision: store token: {e}"))?;
     }
     log::info!("provisioned profile `{profile}` @ {url}");
+    Ok(())
+}
+
+/// Apply a QR / intent provisioning payload — a self-contained JSON object:
+/// `{"llm_family":..,"llm_model":..,"llm_key":..[,"base_url":..,"profile":..,"token":..]}`.
+/// Writes the LLM provider/model/key into the octos profile config
+/// (`_main.json` → config.llm + config.env_vars.<PROVIDER>_API_KEY) and any
+/// server auth via the existing path. Returns a short human summary of what changed.
+pub fn apply_provision_config_json(payload: &str) -> Result<String, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(payload.trim()).map_err(|e| format!("provision: invalid JSON: {e}"))?;
+    let get = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string());
+    let mut summary = Vec::new();
+    if let Some(base) = get("base_url") {
+        let profile = get("profile").unwrap_or_default();
+        let token = get("token").unwrap_or_default();
+        apply_provision_string(&format!("{base}|{profile}|{token}"))?;
+        summary.push("server".to_string());
+    }
+    if let Some(family) = get("llm_family") {
+        apply_llm_config(&family, get("llm_model").as_deref(), get("llm_key").as_deref())?;
+        summary.push(format!("llm={family}"));
+    }
+    if summary.is_empty() {
+        return Err("provision: no recognised fields (want llm_family/llm_key or base_url)".into());
+    }
+    Ok(summary.join(" · "))
+}
+
+/// The octos provider `family_id` → the env var octos reads its key from.
+fn key_env_for(family: &str) -> String {
+    match family {
+        "zai" => "ZAI_API_KEY".into(),
+        "deepseek" => "DEEPSEEK_API_KEY".into(),
+        "openai" => "OPENAI_API_KEY".into(),
+        "anthropic" => "ANTHROPIC_API_KEY".into(),
+        "gemini" => "GEMINI_API_KEY".into(),
+        "openrouter" => "OPENROUTER_API_KEY".into(),
+        other => format!("{}_API_KEY", other.to_uppercase()),
+    }
+}
+
+/// The embedded kernel's `_main.json` profile config (same HOME the kernel is
+/// spawned with: `$HOME/octos-home/.octos/profiles/_main.json`).
+fn octos_profile_config_path() -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "no HOME set".to_string())?;
+    Ok(PathBuf::from(home).join("octos-home/.octos/profiles/_main.json"))
+}
+
+/// Merge the provider/model/key into `_main.json` without disturbing the rest of
+/// the config. Takes effect on the next kernel/session start.
+fn apply_llm_config(family: &str, model: Option<&str>, key: Option<&str>) -> Result<(), String> {
+    let path = octos_profile_config_path()?;
+    let mut root: serde_json::Value = if path.exists() {
+        serde_json::from_slice(&std::fs::read(&path).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("parse {}: {e}", path.display()))?
+    } else {
+        serde_json::json!({})
+    };
+    if !root.get("config").map(|c| c.is_object()).unwrap_or(false) {
+        root["config"] = serde_json::json!({});
+    }
+    let cfg = root["config"].as_object_mut().unwrap();
+
+    let mut primary = serde_json::Map::new();
+    primary.insert("family_id".into(), serde_json::json!(family));
+    if let Some(m) = model {
+        primary.insert("model_id".into(), serde_json::json!(m));
+    }
+    let llm = cfg.entry("llm").or_insert_with(|| serde_json::json!({}));
+    if !llm.is_object() {
+        *llm = serde_json::json!({});
+    }
+    llm["primary"] = serde_json::Value::Object(primary);
+    if llm.get("fallbacks").is_none() {
+        llm["fallbacks"] = serde_json::json!([]);
+    }
+
+    if let Some(k) = key {
+        let env_name = key_env_for(family);
+        let env = cfg.entry("env_vars").or_insert_with(|| serde_json::json!({}));
+        if !env.is_object() {
+            *env = serde_json::json!({});
+        }
+        env[env_name] = serde_json::json!(k);
+    }
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&root).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    log::info!(
+        "provisioned LLM family={family} model={model:?} key={}",
+        if key.is_some() { "set" } else { "kept" }
+    );
     Ok(())
 }
 

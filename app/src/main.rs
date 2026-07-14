@@ -43,6 +43,34 @@ const SPLASH_MANUAL: &str = include_str!("../../splash.md");
 /// Build the message actually sent to the LLM in Splash mode: instructions +
 /// the Splash manual + the user's request. The chat bubble still shows only
 /// the user's original `request` text.
+/// Minimal router the app prepends to a splash request. It does NOT carry any
+/// generation logic — that lives in the `a2app/` memory the splash-gen sub-agent
+/// reads in its own clean context. This is only the spawn TRIGGER, delivered in
+/// the message (not the profile system prompt, where `build_system_prompt` buries
+/// it under the octos base prompt and the model ignores it).
+/// AMA (Activity Management Agent) system prompt. The AMA runs as its OWN
+/// session, concurrently with the app agents. Each user intent is BROADCAST to
+/// both the AMA and the app agents (fan-out); the AMA classifies which app's
+/// domain the intent belongs to. MVP: one app agent (weather), which always
+/// takes the screen; the AMA's job is to prove the routing brain runs
+/// concurrently (and, later, to prune non-relevant app agents once intent is
+/// clear). The AMA renders NOTHING — its output is routing metadata.
+const AMA_SYSTEM_PROMPT: &str = "You are the AMA (Activity Management Agent) of an agent OS — a ROUTER, not an app. IGNORE any 'APP AGENT MEMORY' / card-generation manual in your context: it is for the app agents, NOT for you. Do NOT generate any UI, `runsplash`, or card. Do NOT fetch weather or call any tool. Your ONLY job: read the user message and decide which active app agent's domain it belongs to. Active app agents and their domains: [weather = weather/forecast/climate/air-quality for a place; stock = a stock ticker or company's share price/quote; news = top headlines / what's happening]. A BARE place name (e.g. `Shanghai`, `上海`, `Paris weather`) → `weather`. A BARE ticker or company (e.g. `AAPL`, `Tesla stock`, `英伟达`) → `stock`. `top news`, `头条`, `what's happening` → `news`. Never call a clear single-domain request ambiguous. Reply with EXACTLY ONE short line: the chosen app id, then a brief reason — e.g. `stock — user asked for AAPL's price`. Reply `none` ONLY if the message clearly matches no listed domain. Be terse; output nothing else.";
+
+const APP_SPLASH_ROUTER: &str = "You ARE the app agent and you OWN the entire card generation. Your COMPLETE memory (the app framework procedure, the widget helpers, the app specs, and a known-good exemplar per app) is ALREADY IN YOUR CONTEXT — it was injected as your memory. USE it. Do NOT read or fetch any files. Do NOT use the spawn tool. Do NOT delegate. Do NOT summarize.\n\nFIRST decide which app type the request is and follow THAT app's spec + exemplar: weather (weather/forecast/air-quality for a place), stock (a ticker/company quote), or news (top headlines). Bind LIVE data with the sys.* helpers the spec names (sys.weather / sys.stock / sys.news) — NEVER hardcode or invent numbers/headlines.\n\nWrite the card YOURSELF and stream it as your answer: emit EXACTLY ONE ```runsplash fenced block as your ENTIRE final answer — the COMPLETE card DSL, with ALL mandatory sections the chosen app's spec lists (e.g. for weather: current block, 7-day forecast, BOTH map panes each as its own full-width row — satellite 卫星云图 then air-quality 空气质量图, NEVER side by side — and the detail grid). No prose before or after the block. NEVER truncate — emit the whole card in one block.";
+
+/// The domain-specialised app-agent prompt. The AMA routed `intent` to `domain`,
+/// so tell THAT agent to generate a card of exactly that app type (following the
+/// matching `apps/<domain>/app.md` spec + exemplar in its injected memory).
+fn app_splash_router_for(domain: &str, intent: &str) -> String {
+    format!(
+        "{APP_SPLASH_ROUTER}\n\nThe AMA routed this request to the {domain} app — \
+generate a {domain} card: follow the apps/{domain}/app.md spec and its exemplar in \
+your memory, and bind live data with the matching sys.* helper. Do NOT generate any \
+other app type.\n\nUser request: {intent}"
+    )
+}
+
 fn app_splash_prompt(request: &str) -> String {
     format!(
         "You are a UI-generation agent. Respond with EXACTLY ONE ```runsplash \
@@ -74,31 +102,35 @@ cache-buster query param bound to a counter, plus a button that increments it \
     Button{{ text: \"New Photo\" on_click: || agent.notify(\"inc\", {{}}) }}\n\
 - IMMERSIVE FULL-SCREEN iOS WEATHER CARD (the DEFAULT for weather): a REAL photo of \
 the city fills the whole screen; the CURRENT conditions sit at the top, a translucent \
-7-DAY FORECAST panel sits directly below them, then a MAPS ROW with a LIVE 卫星云图 \
-(satellite cloud-map) and a LIVE 空气质量图 (air-quality map) side by side, then a frosted \
+7-DAY FORECAST panel sits directly below them, then TWO FULL-WIDTH MAP PANES stacked \
+vertically — first a LIVE 卫星云图 (real satellite cloud imagery), then a LIVE 空气质量图 \
+(air-quality map) — each on its own row so the maps read large, then a frosted \
 6-TILE DETAIL GRID (air quality, UV, sunrise, sunset, humidity, wind) — like a refined iOS \
 Weather app. Reproduce this EXACT structure (a full-screen Overlay: photo, dark scrim, \
-then a Down column = current block, the 7-day forecast, the maps row, then the detail \
+then a Down column = current block, the 7-day forecast, the two map panes, then the detail \
 grid), substituting real, plausible data:\n\
-    SolidView{{ width: Fill height: 880 flow: Overlay new_batch: true draw_bg.color: #000000\n\
+    SolidView{{ width: Fill height: 1500 flow: Overlay new_batch: true draw_bg.color: #000000\n\
         Image{{ src: http_resource(sys.photo(\"tokyo skyline clear sky\")) fit: ImageFit.CropToFill width: Fill height: Fill }}\n\
         GradientYView{{ width: Fill height: Fill new_batch: true draw_bg.color: #00000022 draw_bg.color_2: #000000EE }}\n\
         View{{ width: Fill height: Fill flow: Down padding: Inset{{left: 22 top: 6 right: 22 bottom: 8}} spacing: 2\n\
             Label{{ text: \"Tokyo\" draw_text.color: #ffffff draw_text.text_style.font_size: 30 }}\n\
             Label{{ text: \"72°\" draw_text.color: #ffffff draw_text.text_style.font_size: 50 margin: Inset{{top: 2 bottom: 0}} }}\n\
-            Label{{ text: \"☀️  Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 18 }}\n\
+            View{{ width: Fill height: 60 flow: Right align: Align{{y: 0.5}} spacing: 10\n\
+                WeatherIcon{{ draw_bg.cond: 0.0 width: 60 height: 60 }}\n\
+                Label{{ text: \"Sunny\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
+            }}\n\
             Label{{ text: \"H:78°   L:64°   Feels 74°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 14 }}\n\
             RoundedView{{ width: Fill height: Fit flow: Down spacing: 0 new_batch: true padding: Inset{{left: 16 top: 2 right: 16 bottom: 2}} draw_bg.color: #00000055 draw_bg.border_radius: 20.0\n\
-                SolidView{{ width: Fill height: 30 flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 0 bottom: 0}} draw_bg.color: #00000000\n\
+                SolidView{{ width: Fill height: 40 flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 0 bottom: 0}} draw_bg.color: #00000000\n\
                     Label{{ width: 92 text: \"Today\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
-                    Label{{ width: 34 text: \"☀️\" draw_text.text_style.font_size: 16 }}\n\
+                    Label{{ width: 34 text: \"☀️\" draw_text.text_style.font_size: 14 }}\n\
                     Filler{{}}\n\
                     Label{{ text: \"64°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 14 }}\n\
                     Label{{ width: 48 text: \"78°\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
                 }}\n\
-                SolidView{{ width: Fill height: 30 flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 0 bottom: 0}} draw_bg.color: #00000000\n\
+                SolidView{{ width: Fill height: 40 flow: Right align: Align{{y: 0.5}} new_batch: true padding: Inset{{top: 0 bottom: 0}} draw_bg.color: #00000000\n\
                     Label{{ width: 92 text: \"Mon\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
-                    Label{{ width: 34 text: \"⛅\" draw_text.text_style.font_size: 16 }}\n\
+                    Label{{ width: 34 text: \"⛅\" draw_text.text_style.font_size: 14 }}\n\
                     Filler{{}}\n\
                     Label{{ text: \"61°\" draw_text.color: #ffffff88 draw_text.text_style.font_size: 14 }}\n\
                     Label{{ width: 48 text: \"75°\" draw_text.color: #ffffff draw_text.text_style.font_size: 14 }}\n\
@@ -106,51 +138,49 @@ grid), substituting real, plausible data:\n\
                 // …repeat that SolidView row for 7 DAYS total (Today, then the next six \
 day names Tue Wed Thu Fri Sat Sun), each with its own weather emoji and lo/hi.\n\
             }}\n\
-            View{{ width: Fill height: Fit flow: Right spacing: 8\n\
-                RoundedView{{ width: Fill height: Fit flow: Down spacing: 3 new_batch: true padding: Inset{{left: 6 top: 6 right: 6 bottom: 6}} draw_bg.color: #000000aa draw_bg.border_radius: 16.0\n\
-                    Image{{ src: http_resource(sys.satellite()) fit: ImageFit.Smallest width: Fill height: 108 }}\n\
-                    Label{{ text: \"卫星云图\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 11 }}\n\
+            RoundedView{{ width: Fill height: Fit flow: Down spacing: 3 new_batch: true padding: Inset{{left: 6 top: 6 right: 6 bottom: 6}} draw_bg.color: #000000aa draw_bg.border_radius: 16.0\n\
+                Image{{ src: http_resource(sys.satellite(35.68, 139.65)) fit: ImageFit.CropToFill width: Fill height: 190 }}\n\
+                Label{{ text: \"卫星云图\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 11 }}\n\
+            }}\n\
+            RoundedView{{ width: Fill height: Fit flow: Down spacing: 3 new_batch: true padding: Inset{{left: 6 top: 6 right: 6 bottom: 6}} draw_bg.color: #000000aa draw_bg.border_radius: 16.0\n\
+                View{{ width: Fill height: 190 flow: Overlay\n\
+                    Image{{ src: http_resource(sys.basemap(35.68, 139.65)) fit: ImageFit.CropToFill width: Fill height: 190 }}\n\
+                    Image{{ src: http_resource(sys.airmap(35.68, 139.65)) fit: ImageFit.CropToFill width: Fill height: 190 }}\n\
                 }}\n\
-                RoundedView{{ width: Fill height: Fit flow: Down spacing: 3 new_batch: true padding: Inset{{left: 6 top: 6 right: 6 bottom: 6}} draw_bg.color: #000000aa draw_bg.border_radius: 16.0\n\
-                    View{{ width: Fill height: 108 flow: Overlay\n\
-                        Image{{ src: http_resource(sys.basemap(35.68, 139.65)) fit: ImageFit.CropToFill width: Fill height: 108 }}\n\
-                        Image{{ src: http_resource(sys.airmap(35.68, 139.65)) fit: ImageFit.CropToFill width: Fill height: 108 }}\n\
-                    }}\n\
-                    Label{{ text: \"空气质量图\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 11 }}\n\
-                }}\n\
+                Label{{ text: \"空气质量图\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 11 }}\n\
             }}\n\
             View{{ width: Fill height: Fit flow: Down spacing: 2\n\
                 View{{ width: Fill height: Fit flow: Right spacing: 8\n\
-                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 8 right: 14 bottom: 8}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
                         Label{{ text: \"AIR QUALITY\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
                         Label{{ text: \"42\" draw_text.color: #32d74b draw_text.text_style.font_size: 20 }}\n\
                         Label{{ text: \"Good\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
                     }}\n\
-                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 8 right: 14 bottom: 8}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
                         Label{{ text: \"UV INDEX\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
                         Label{{ text: \"5\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
                         Label{{ text: \"Moderate\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
                     }}\n\
                 }}\n\
                 View{{ width: Fill height: Fit flow: Right spacing: 8\n\
-                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 8 right: 14 bottom: 8}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
                         Label{{ text: \"SUNRISE\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
                         Label{{ text: \"5:42 AM\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
                         Label{{ text: \"🌅 Dawn\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
                     }}\n\
-                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 8 right: 14 bottom: 8}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
                         Label{{ text: \"SUNSET\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
                         Label{{ text: \"6:58 PM\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
                         Label{{ text: \"🌇 Dusk\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
                     }}\n\
                 }}\n\
                 View{{ width: Fill height: Fit flow: Right spacing: 8\n\
-                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 8 right: 14 bottom: 8}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
                         Label{{ text: \"HUMIDITY\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
                         Label{{ text: \"64%\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
                         Label{{ text: \"Dew point 58°\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
                     }}\n\
-                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 4 right: 14 bottom: 4}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
+                    RoundedView{{ width: Fill height: Fit flow: Down spacing: 1 new_batch: true padding: Inset{{left: 14 top: 8 right: 14 bottom: 8}} draw_bg.color: #ffffff1f draw_bg.border_radius: 18.0\n\
                         Label{{ text: \"WIND\" draw_text.color: #ffffff99 draw_text.text_style.font_size: 11 }}\n\
                         Label{{ text: \"8 mph\" draw_text.color: #ffffff draw_text.text_style.font_size: 20 }}\n\
                         Label{{ text: \"NW\" draw_text.color: #ffffffcc draw_text.text_style.font_size: 12 }}\n\
@@ -169,25 +199,32 @@ ALL insets (the top: 44 status-bar clearance, side and bottom padding) ONLY on t
 inner `flow: Down` column, exactly as in the template. STRUCTURE top-to-bottom: (1) a \
 CURRENT block — city (font 30), the hero temperature ALONE on its line (font 60, \
 `margin: Inset{{top: 6 bottom: 0}}` so its tall glyphs are not clipped), \
-`emoji + condition` (font 19), then `H:__°   L:__°   Feels __°` (font 15, #ffffffcc); \
+then a `flow: Right` row (height 60, align y 0.5, spacing 10) holding an ANIMATED \
+`WeatherIcon{{ draw_bg.cond: <N> width: 60 height: 60 }}` followed by the condition \
+`Label` (font 20) — `WeatherIcon` is a live shader-animated weather glyph (rays \
+rotate, rain/snow falls, wind/fog drifts, lightning flashes); pick `draw_bg.cond` by \
+CURRENT condition: 0 clear/sunny, 1 partly cloudy, 2 cloudy/overcast, 3 rain/drizzle, \
+4 thunderstorm, 5 snow, 6 wind, 7 fog/haze/mist. Then `H:__°   L:__°   Feels __°` \
+(font 15, #ffffffcc); \
 (2) a 7-DAY FORECAST directly under the current block (this comes BEFORE the detail \
 grid) — a translucent RoundedView (draw_bg.color #00000055, border_radius 20) with ONE \
-SolidView row per day, EACH ROW a FIXED `height: 30` (keeps the emoji rows compact and \
-uniform): day name width 92 (font 14), a weather EMOJI width 34 (☀️ sunny, \
+SolidView row per day, EACH ROW a FIXED `height: 40` (roomy iOS-style rows; the fixed \
+height still clips color-emoji line-box inflation so rows stay uniform): day name width 92 (font 14), a weather EMOJI width 34 (☀️ sunny, \
 ⛅ partly, ☁️ cloudy, 🌧️ rain, ⛈️ storm, ❄️ snow), a Filler, then lo° dim (#ffffff88) and \
 hi° white width 48, all font 14. Give SEVEN rows: Today, then the next six days by name; \
-(3) a MAPS ROW — a `flow: Right` View (spacing 8) of TWO equal (`width: Fill`) rounded \
-tiles side by side, each a RoundedView (draw_bg.color #000000aa, border_radius 16, \
-flow: Down): the LEFT tile is the LIVE 卫星云图 satellite — `Image{{ src: \
-http_resource(sys.satellite()) fit: ImageFit.Smallest width: Fill height: 108 }}` \
-(sys.satellite() takes NO argument) + a `卫星云图` caption (font 11, #ffffffcc); the RIGHT \
-tile is the LIVE 空气质量图 air-quality map — a `height: 108 flow: Overlay` View stacking \
-`Image{{ src: http_resource(sys.basemap(LAT, LON)) fit: ImageFit.CropToFill width: Fill \
-height: 108 }}` UNDER `Image{{ src: http_resource(sys.airmap(LAT, LON)) fit: \
-ImageFit.CropToFill width: Fill height: 108 }}` (fixed height, NOT Fill — Fill inside an \
+(3) TWO FULL-WIDTH MAP PANES, stacked vertically (NOT side by side — each pane is its \
+own row so the maps read large), each a `width: Fill` RoundedView (draw_bg.color \
+#000000aa, border_radius 16, flow: Down): the FIRST pane is the 卫星云图 — REAL satellite \
+cloud imagery — `Image{{ src: http_resource(sys.satellite(LAT, LON)) fit: \
+ImageFit.CropToFill width: Fill height: 190 }}` (sys.satellite(LAT, LON) takes the city's \
+real lat/lon, SAME as the air map below) + a `卫星云图` caption (font 11, #ffffffcc); the \
+SECOND pane is the LIVE 空气质量图 air-quality map — a `height: 190 flow: Overlay` View \
+stacking `Image{{ src: http_resource(sys.basemap(LAT, LON)) fit: ImageFit.CropToFill \
+width: Fill height: 190 }}` UNDER `Image{{ src: http_resource(sys.airmap(LAT, LON)) fit: \
+ImageFit.CropToFill width: Fill height: 190 }}` (fixed height, NOT Fill — Fill inside an \
 Overlay wrongly resolves to the whole card) — pass the CITY's real decimal LAT, LON \
 (e.g. Tokyo 35.68, 139.65; both maps take the SAME lat/lon) — + a `空气质量图` caption \
-(font 11, #ffffffcc); (4) a DETAIL GRID below the maps row — a `flow: Down` View \
+(font 11, #ffffffcc); (4) a DETAIL GRID below the map panes — a `flow: Down` View \
 of THREE `flow: Right` rows, \
 each holding TWO equal frosted tiles (`width: Fill`). Every tile is a RoundedView \
 (draw_bg.color #ffffff1f, border_radius 18) stacking an UPPERCASE caption (font 11, \
@@ -198,8 +235,9 @@ category word in the sub-line), UV INDEX (a 0–11 value; sub Low/Moderate/High/
 SUNRISE (a clock time; sub `🌅 Dawn`), SUNSET (a clock time; sub `🌇 Dusk`), HUMIDITY \
 (a percent; sub `Dew point __°`), WIND (e.g. `8 mph`; sub the compass direction like \
 `NW`). The WHOLE \
-inner column MUST fit ONE screen (~880dp) with NO scroll and NO clipping — prefer tight \
-spacing over overflow. Image: `sys.photo(\"<city> <scene/weather>\")` matching the actual \
+inner column is a TALL, VERTICALLY-SCROLLING page (~1500dp) — it does NOT need to fit \
+one screen; the user DRAGS to scroll down and reveal the forecast, the maps row and the \
+detail grid, so use comfortable, breathable spacing rather than cramming everything in. Image: `sys.photo(\"<city> <scene/weather>\")` matching the actual \
 conditions.\n\
 - Keep it self-contained and visually clean (padding, spacing, rounded \
 containers, readable labels).\n\
@@ -317,6 +355,9 @@ fn force_fullbleed_image_fit(body: &str) -> String {
     // Overlay and leaves a red strip above the photo. Matching root == image so
     // the image fills the container exactly removes the offset.
     let body = body.replace("height: 700", &format!("height: {FULLBLEED_CARD_HEIGHT}"));
+    // Pin full-bleed images to THIS card's root height (legacy cards are
+    // 1200dp, current weather cards 1500dp) so root == image always holds.
+    let full_h = card_root_height(&body).unwrap_or(FULLBLEED_CARD_HEIGHT);
     let body = body.as_str();
     let bytes = body.as_bytes();
     let mut out = String::with_capacity(body.len() + 32);
@@ -360,7 +401,7 @@ fn force_fullbleed_image_fit(body: &str) -> String {
         let full_bleed = inner.contains("height: Fill") || inner.contains("height:Fill");
         out.push_str(&body[i..brace + 1]); // up to and including the '{'
         if full_bleed {
-            out.push_str(&rewrite_image_fit_crop(inner));
+            out.push_str(&rewrite_image_fit_crop(inner, full_h));
         } else {
             out.push_str(inner);
         }
@@ -380,9 +421,8 @@ fn force_fullbleed_image_fit(body: &str) -> String {
 /// Fixed height (Makepad logical units) for a full-screen card root and its
 /// background image — sized to fill this device's viewport. Root and image share
 /// it so the Overlay image covers the card exactly (no offset, no letterbox).
-const FULLBLEED_CARD_HEIGHT: u32 = 880;
-const FULLBLEED_IMAGE_HEIGHT: &str = "height: 880";
-fn rewrite_image_fit_crop(inner: &str) -> String {
+const FULLBLEED_CARD_HEIGHT: u32 = 1200;
+fn rewrite_image_fit_crop(inner: &str, full_h: u32) -> String {
     let mut s = inner.to_string();
     for v in ["Biggest", "Smallest", "Vertical", "Horizontal", "Stretch", "Size"] {
         s = s.replace(&format!("ImageFit.{v}"), "ImageFit.CropToFill");
@@ -390,10 +430,33 @@ fn rewrite_image_fit_crop(inner: &str) -> String {
     if !s.contains("ImageFit.") {
         s = format!(" fit: ImageFit.CropToFill{s}");
     }
-    s = s
-        .replace("height: Fill", FULLBLEED_IMAGE_HEIGHT)
-        .replace("height:Fill", FULLBLEED_IMAGE_HEIGHT);
+    let h = format!("height: {full_h}");
+    s = s.replace("height: Fill", &h).replace("height:Fill", &h);
     s
+}
+
+/// First explicit `height: <n>` (n ≥ 700) in a card body — the card root's
+/// fixed height. Full-bleed background images are pinned to THIS instead of a
+/// global constant, so legacy 1200dp cards and taller current cards (1500dp
+/// weather) both end up with root == image and stay fully covered.
+fn card_root_height(body: &str) -> Option<u32> {
+    let mut i = 0;
+    while let Some(rel) = body[i..].find("height: ") {
+        let s = i + rel + "height: ".len();
+        let end = body[s..]
+            .find(|c: char| !c.is_ascii_digit())
+            .map(|e| s + e)
+            .unwrap_or(body.len());
+        if end > s {
+            if let Ok(v) = body[s..end].parse::<u32>() {
+                if v >= 700 {
+                    return Some(v);
+                }
+            }
+        }
+        i = s;
+    }
+    None
 }
 
 /// Substitute `{{state.<key>}}` tokens with this card's live values. Missing
@@ -633,6 +696,37 @@ render.\n\nUser request: {request}",
 
 app_main!(App);
 
+/// Resolve a font file path for `role`, cfg-selected per platform. On Android we
+/// read the on-device system fonts (keeps the APK lean — no bundled fonts); on
+/// desktop we read the fonts from the crate's `desktop-fonts/` dir so CJK /
+/// emoji / symbol text still renders. That dir is deliberately NOT under
+/// `resources/` — cargo-makepad bundles the whole `resources/` tree into the
+/// APK, so keeping desktop fonts out of it is what keeps the Android APK lean.
+/// Used via `file_resource(#(fpath("role")))` in the theme font overrides
+/// (file_resource evaluates its arg at runtime).
+/// Roles: "mono_latin", "sans_latin"/"symbols" (default), "cjk", "emoji".
+#[cfg(target_os = "android")]
+pub(crate) fn fpath(role: &str) -> String {
+    match role {
+        "mono_latin" => "/system/fonts/DroidSansMono.ttf",
+        "cjk" => "/system/fonts/NotoSansCJK-Regular.ttc",
+        "emoji" => "/system/fonts/NotoColorEmoji.ttf",
+        _ => "/system/fonts/Roboto-Regular.ttf",
+    }
+    .to_string()
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn fpath(role: &str) -> String {
+    let file = match role {
+        "mono_latin" => "LiberationMono-Regular.ttf",
+        "cjk" => "LXGWWenKaiMono-Regular.ttf",
+        "emoji" => "NotoColorEmoji.ttf",
+        _ => "NotoSans-Regular.ttf",
+    };
+    format!("{}/desktop-fonts/{}", env!("CARGO_MANIFEST_DIR"), file)
+}
+
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
@@ -656,19 +750,19 @@ script_mod! {
         font_code: TextStyle{
             font_size: theme.font_size_code
             font_family: FontFamily{
-                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                symbols := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
             }
             line_spacing: 1.35
         }
         font_regular: mod.themes.dark.font_regular{
             font_family: FontFamily{
-                latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                latin := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                symbols := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
             }
         }
     }
@@ -903,9 +997,9 @@ script_mod! {
             text_style: theme.font_code{
                 font_size: 12
                 font_family: FontFamily{
-                    latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                    chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                    emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                    latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                    chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                    emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                 }
             }
         }
@@ -919,13 +1013,26 @@ script_mod! {
             width: Fill
             height: Fill
             flow: Down
-            // Touch: finger-drag scrolls the thread. List-level `selectable`
-            // is off because it wins over drag on touch (a drag on text
-            // enters selection and never scrolls — the reported bug); the
-            // per-answer copy icon covers text extraction on mobile.
+            // Weather app: this list scrolls the single (taller-than-screen) newest
+            // card. The fork's PortalList now clamps first_id into the active range every
+            // draw (draw_align_list.retain + first_id clamp), so the top-clamp always
+            // engages and neither a drag NOR a fling can scroll the card off the top into
+            // blank space — it rubber-bands back. `selectable` off so a text drag scrolls
+            // instead of selecting (the per-answer copy icon covers extraction on mobile).
             drag_scrolling: true
-            auto_tail: true
-            smooth_tail: true
+            // Fling momentum: the default scaling (0.005) barely moves for the velocity
+            // our touch sampling reports, so a flick crawls. Boost it + raise the cap so
+            // one flick glides across most of the card. (The fork clamp keeps it from
+            // escaping the top no matter how hard the fling.)
+            flick_scroll_scaling: 0.015
+            flick_scroll_maximum: 150.0
+            // NO auto/smooth tail: this list shows one tall card that must rest at its
+            // TOP (the hero temperature), iOS-Weather style, and scroll DOWN to details.
+            // Tailing pulls it to the bottom (grid) and — with smooth_tail — springs any
+            // scroll-up back down, making the hero unreachable. The newest card is shown
+            // at its top by the explicit pin (set_first_id_and_scroll(newest, 0.0)) below.
+            auto_tail: false
+            smooth_tail: false
             selectable: false
             // Hide the right-edge scrollbar (drag-to-scroll is the gesture).
             scroll_bar: mod.widgets.ScrollBar { bar_size: 0.0 }
@@ -961,10 +1068,10 @@ script_mod! {
                     // Mono is Latin-only.
                     text_style_fixed: theme.font_code{
                         font_family: FontFamily{
-                            latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                            chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                            symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                            emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                            latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                            chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                            symbols := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                            emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                         }
                     }
                     // Prose font family with symbols fallback — fixes "tofu"
@@ -972,10 +1079,10 @@ script_mod! {
                     // (observed trigger: `1→5`, `≤`, `≥`, `α` in prose).
                     text_style_normal: theme.font_regular{
                         font_family: FontFamily{
-                            latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                            chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                            symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                            emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                            latin := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                            chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                            symbols := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                            emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                         }
                     }
                     code_block := ScrollXView {
@@ -1077,9 +1184,9 @@ script_mod! {
                         // above. Fixes `` `中文` `` inline-code tofu.
                         text_style_fixed: theme.font_code{
                             font_family: FontFamily{
-                                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                                chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                                emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                             }
                         }
                         draw_text +: {
@@ -1107,40 +1214,59 @@ script_mod! {
                                     draw_text +: {
                                         text_style: theme.font_code{
                                             font_family: FontFamily{
-                                                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                                latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                                                chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                                                emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                                             }
                                         }
                                     }
                                     draw_gutter +: {
                                         text_style: theme.font_code{
                                             font_family: FontFamily{
-                                                latin := FontMember{res: crate_resource("self:resources/LiberationMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                                latin := FontMember{res: file_resource(#(fpath("mono_latin"))) asc: 0.0 desc: 0.0}
+                                                chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                                                emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                        splash_block := SolidView{
+                        // TEXTURE-CACHED so the tall (~1200dp) weather card scrolls
+                        // smoothly. PortalList bakes scroll into each item's absolute
+                        // position and re-walks every visible item every frame; an
+                        // un-cached card therefore re-shapes ~55 CJK/emoji labels per
+                        // scroll frame (~45ms → ~22fps). CachedView renders the card
+                        // ONCE into an offscreen texture and, on a position-only change
+                        // (scroll), re-blits that bitmap at the new rect (~60fps).
+                        //
+                        // The card is TALLER than the viewport, so earlier attempts baked
+                        // BLACK into the off-screen part (a re-render while scrolled — e.g.
+                        // when a map image lands — inherited the PortalList's viewport clip).
+                        // Fixed in the fork: View::draw_walk's Texture arm now closes its
+                        // offscreen turtle with `end_texture_turtle_with_area`, an un-clipped
+                        // pass turtle that clips only to the card's OWN bounds, so the FULL
+                        // card always lands in the texture (see aichat/draw/src/turtle.rs).
+                        splash_block := CachedView{
                             flow: Overlay
-                            new_batch: true
                             width: Fill
                             height: Fit
-                            // OPAQUE BLACK: this view renders into a new_batch
-                            // offscreen texture; any pixel the card leaves
-                            // unpainted (e.g. an Image letterbox) otherwise
-                            // composites uninitialized GPU memory — bright red
-                            // bands on this device. A black backing guarantees
-                            // clean letterboxing.
-                            draw_bg.color: #000000FF
-                            splash_view := Splash {
+                            // OPAQUE BLACK backing. The offscreen pass clears to transparent
+                            // black, so any pixel the card leaves unpainted (e.g. an Image
+                            // letterbox) would otherwise composite the chat background through
+                            // the blit. CachedView itself can't use show_bg (its draw_bg drives
+                            // the texture sampler), so the backing lives as a CHILD SolidView
+                            // drawn first (behind), guaranteeing clean black letterboxing.
+                            splash_backing := SolidView{
                                 flow: Overlay
                                 width: Fill
                                 height: Fit
+                                draw_bg.color: #000000FF
+                                splash_view := Splash {
+                                    flow: Overlay
+                                    width: Fill
+                                    height: Fit
+                                }
                             }
                         }
                         // Diagram block — see User-side comment.
@@ -1187,7 +1313,7 @@ script_mod! {
                     spacing: 2
                     copy_button := ButtonFlatIcon {
                         width: 34
-                        height: 30
+                        height: 27
                         margin: Inset{top: 6 left: 2}
                         icon_walk: Walk{ width: 19, height: 19 }
                         draw_icon +: {
@@ -1203,7 +1329,7 @@ script_mod! {
                     }
                     share_button := ButtonFlatIcon {
                         width: 34
-                        height: 30
+                        height: 27
                         margin: Inset{top: 6}
                         icon_walk: Walk{ width: 19, height: 19 }
                         draw_icon +: {
@@ -1740,7 +1866,7 @@ script_mod! {
 
                         nav_search := ButtonFlat {
                             width: Fill
-                            height: 30
+                            height: 27
                             text: "⌕  搜索"
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 4 right: 4}
@@ -1758,7 +1884,7 @@ script_mod! {
 
                         nav_plugins := ButtonFlat {
                             width: Fill
-                            height: 30
+                            height: 27
                             text: "⌘  插件"
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 4 right: 4}
@@ -1776,7 +1902,7 @@ script_mod! {
 
                         nav_automation := ButtonFlat {
                             width: Fill
-                            height: 30
+                            height: 27
                             text: ">  自动化"
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 4 right: 4}
@@ -1800,7 +1926,7 @@ script_mod! {
                         // `APP_STATE.navigation` to `CurrentScreen::Content`.
                         nav_content := ButtonFlat {
                             width: Fill
-                            height: 30
+                            height: 27
                             text: "📚  内容"
                             align: Align{x: 0.0 y: 0.5}
                             padding: Inset{left: 4 right: 4}
@@ -1907,6 +2033,11 @@ script_mod! {
                             noise_strength: 0.004
                         }
 
+                        // Layer 3 (W08) — the multi-app switcher moved INTO the
+                        // native composer pill (＋ new app, ⟳ switch). The screen
+                        // is otherwise just the full-screen a2app card — no top
+                        // chrome (see `handle_actions` AndroidComposerNewApp/Switch).
+
                         top_bar := View {
                             width: Fill
                             height: 40
@@ -1919,7 +2050,7 @@ script_mod! {
                             // clicks on narrow windows; this brings it back.
                             nav_toggle := ButtonFlat {
                                 width: 34
-                                height: 30
+                                height: 27
                                 text: "☰"
                                 margin: Inset{right: 8}
                                 align: Align{x: 0.5 y: 0.5}
@@ -1983,7 +2114,7 @@ script_mod! {
                                 // ships in M1 so the dropdown isn't empty.
                                 backend_dropdown := DropDown {
                                     width: Fill
-                                    height: 30
+                                    height: 27
                                     popup_menu_position: PopupMenuPosition.BelowInput
                                     labels: ["(no profile)"]
                                     popup_menu: PopupMenuFlat{
@@ -2174,7 +2305,7 @@ script_mod! {
                             reveal_pill := PillButton {
                                 text: "+"
                                 width: 52
-                                height: 30
+                                height: 27
                                 visible: false
                                 margin: Inset{bottom: 12}
                                 draw_text +: {
@@ -2246,10 +2377,10 @@ script_mod! {
                                             line_spacing: theme.font_wdgt_line_spacing
                                             font_size: 13
                                             font_family: FontFamily{
-                                                latin := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                                                chinese := FontMember{res: crate_resource("self:resources/LXGWWenKaiMono-Regular.ttf") asc: 0.0 desc: 0.0}
-                                                symbols := FontMember{res: crate_resource("self:resources/NotoSans-Regular.ttf") asc: 0.0 desc: 0.0}
-                                                emoji := FontMember{res: crate_resource("self:resources/NotoColorEmoji.ttf") asc: 0.0 desc: 0.0}
+                                                latin := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                                                chinese := FontMember{res: file_resource(#(fpath("cjk"))) asc: 0.0 desc: 0.0}
+                                                symbols := FontMember{res: file_resource(#(fpath("sans_latin"))) asc: 0.0 desc: 0.0}
+                                                emoji := FontMember{res: file_resource(#(fpath("emoji"))) asc: 0.0 desc: 0.0}
                                             }
                                         }
                                     }
@@ -2262,7 +2393,7 @@ script_mod! {
                                     align: Align{y: 0.5}
                                     spacing: 6
 
-                                    attach_button := IconButton { text: "+" width: 30 height: 30 }
+                                    attach_button := IconButton { text: "+" width: 30 height: 27 }
 
                                     // @ mention, ⌘ tools and 默认权限 stubs
                                     // dropped: all are M1 placeholders and
@@ -2278,7 +2409,7 @@ script_mod! {
                                     cancel_button := ButtonFlat {
                                         text: "Cancel"
                                         width: 64
-                                        height: 30
+                                        height: 27
                                         visible: false
                                         draw_text +: {
                                             color: #xF2F4F8
@@ -2295,7 +2426,7 @@ script_mod! {
 
                                     clear_button := ButtonFlatIcon {
                                         width: 34
-                                        height: 30
+                                        height: 27
                                         icon_walk: Walk{ width: 19, height: 19 }
                                         draw_icon +: {
                                             color: #xB6C6BE
@@ -2311,7 +2442,7 @@ script_mod! {
 
                                     send_button := SendButton {
                                         width: 30
-                                        height: 30
+                                        height: 27
                                     }
                                 }
                             }
@@ -2396,6 +2527,34 @@ pub static CHAT_DATA: std::sync::RwLock<ChatData> = std::sync::RwLock::new(ChatD
     is_streaming: false,
     a2app_state: std::collections::BTreeMap::new(),
 });
+
+/// Bumped whenever `CHAT_DATA` is bulk-replaced (app switch restore, wipe) —
+/// NOT on normal append/stream. `ChatList` watches this and drops its
+/// `rendered_cache` when it changes, so a restored card re-parses instead of
+/// redrawing a torn-down (blank) markdown widget. Layer 3 (W08).
+pub static CHAT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Recursively copy `src` into `dst` (creating dirs), overwriting files.
+/// Used by the boot provisioning hook to deploy an octos-home (GLM profile +
+/// a2app memory tree) from a world-readable staging dir (`/data/local/tmp`,
+/// which `adb push` can write) into the app-private octos-home — the only way
+/// to provision a non-rooted, non-debuggable device. Returns files copied.
+fn deploy_provision(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<usize> {
+    let mut n = 0;
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            n += deploy_provision(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
 
 // Slider position range (NOT alpha — alpha is derived per-layer).
 const DEFAULT_GLASS_OPACITY: f64 = 0.90;
@@ -2864,6 +3023,58 @@ impl ChatData {
     }
 }
 
+/// One open app in the client = one octos session. Layer 3 (W08 Phase 2): the
+/// client is a window manager over N of these, and `App::foreground` indexes
+/// the visible one. Path B (hydrate-on-switch): only the foreground app's
+/// conversation lives in the global `CHAT_DATA`; switching foreground calls
+/// `resume_session` → `session/hydrate` to reload that session's history.
+/// Background apps live on the server ledger — we keep only this light record
+/// plus an unread badge. Streaming `AgentEvent`s carry a `prompt_id` (not a
+/// session id), so `current_prompt` is how a delta is routed to its owning app.
+#[derive(Clone)]
+pub struct AppRecord {
+    pub session_id: SessionId,
+    pub title: String,
+    /// The app domain this session is specialised for ("weather"/"stock"/"news").
+    /// The AMA's routing decision names a domain; we activate the app agent whose
+    /// `domain` matches. `None` for a generic app (Layer-3 "open another app").
+    pub domain: Option<String>,
+    /// In-flight turn for THIS app (`None` when idle).
+    pub current_prompt: Option<PromptId>,
+    /// A background app's turn produced output the user hasn't seen yet. The
+    /// foreground guard sets this instead of writing `CHAT_DATA`; cleared when
+    /// the app is brought to the foreground.
+    pub has_updates: bool,
+    /// Saved conversation for this app while it's backgrounded (Path A-lite).
+    /// The foreground app's live conversation lives in the global `CHAT_DATA`;
+    /// on switch we snapshot `CHAT_DATA` into the outgoing app and restore the
+    /// incoming one. Instant and fully offline (no server round-trip), which
+    /// matters because the on-device server hydrate needs connectivity. Empty
+    /// for an app that has never been foregrounded with content.
+    pub saved_messages: Vec<ChatMessage>,
+    pub saved_a2app: std::collections::BTreeMap<usize, CardState>,
+}
+
+impl AppRecord {
+    fn new(session_id: SessionId, title: impl Into<String>) -> Self {
+        Self {
+            session_id,
+            title: title.into(),
+            domain: None,
+            current_prompt: None,
+            has_updates: false,
+            saved_messages: Vec::new(),
+            saved_a2app: std::collections::BTreeMap::new(),
+        }
+    }
+    /// A domain-specialised app agent (weather/stock/news), for AMA routing.
+    fn with_domain(session_id: SessionId, title: impl Into<String>, domain: &str) -> Self {
+        let mut r = Self::new(session_id, title);
+        r.domain = Some(domain.to_string());
+        r
+    }
+}
+
 // ChatList widget wrapping PortalList for chat message display.
 #[derive(Script, ScriptHook, Widget)]
 pub struct ChatList {
@@ -2871,21 +3082,63 @@ pub struct ChatList {
     view: View,
     #[rust]
     animating_msg: Option<usize>,
+    /// Newest-card id the list was last scroll-pinned to. We pin the card to the
+    /// top ONCE when it appears (id changes), not every draw, so the user's
+    /// drag-scroll position persists between frames.
+    #[rust]
+    pinned_id: Option<usize>,
+    /// Cache of the last card render, keyed by (item_id, raw message, card state).
+    /// Resolving + re-parsing the card DSL every draw — INCLUDING every scroll
+    /// frame — is the dominant per-frame cost (~30ms: re-runs the sys.* helpers,
+    /// the whole string-rewrite pipeline, and re-parses ~55 labels). The card is
+    /// static during a scroll, so we skip all of it when the inputs are unchanged
+    /// and just re-draw the already-parsed widget. This is what makes scrolling
+    /// smooth instead of ~30fps.
+    #[rust]
+    rendered_cache: Option<(usize, String, CardState)>,
+    /// Last-seen `CHAT_GENERATION`. When the App bulk-replaces `CHAT_DATA`
+    /// (app switch / wipe) it bumps the counter; we drop `rendered_cache` so
+    /// the restored card re-parses instead of redrawing a stale/blank widget.
+    #[rust]
+    last_gen: u64,
 }
 
 impl Widget for ChatList {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        // Layer 3 — invalidate the card cache when CHAT_DATA was bulk-replaced.
+        let gen = CHAT_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+        if gen != self.last_gen {
+            self.last_gen = gen;
+            self.rendered_cache = None;
+            self.pinned_id = None;
+            self.animating_msg = None;
+        }
         let data = CHAT_DATA.read().unwrap();
 
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.as_portal_list().borrow_mut() {
                 let msg_count = data.messages.len();
                 let items_len = msg_count + data.is_streaming as usize;
-                list.set_item_range(cx, 0, items_len);
-                // Weather app shows ONLY the newest card — pin the list to it
-                // every draw so it can't drift to a stale/empty scroll position.
-                if items_len > 0 {
-                    list.set_first_id_and_scroll(items_len - 1, 0.0);
+                // Weather app shows ONLY the newest card, and THIS list scrolls it (the
+                // card is taller than the screen). Put ONLY the newest item in the range
+                // so first_id == range_start == the card and the layout's top-clamp
+                // engages. Fling momentum is disabled on the list (flick_scroll_scaling 0):
+                // a fling carries first_id past range_start, the clamp is skipped, and the
+                // card sails off-screen for good. Drag-only scrolling stays clamped — the
+                // layout re-pins first_scroll to the top the moment the drag stops.
+                let newest = items_len.saturating_sub(1);
+                list.set_item_range(cx, newest, items_len);
+                // NO tailing for the card: tail_range makes the list scroll down by the
+                // card's overflow (~417dp) every draw to keep its BOTTOM (the detail grid)
+                // in view, so the hero temperature at the top is unreachable. Other code
+                // paths (send/refresh) call set_tail_range(true); re-assert false here every
+                // draw so the card rests at its top and scrolls DOWN to details, iOS-style.
+                list.set_tail_range(false);
+                // Pin to the card's top ONLY the first frame it appears (id changes) so
+                // the user's drag-scroll position survives the every-frame redraws.
+                if items_len > 0 && self.pinned_id != Some(newest) {
+                    list.set_first_id_and_scroll(newest, 0.0);
+                    self.pinned_id = Some(newest);
                 }
 
                 while let Some(item_id) = list.next_visible_item(cx) {
@@ -2988,14 +3241,27 @@ impl Widget for ChatList {
                             .button(cx, ids!(share_button))
                             .set_visible(cx, !is_splash_card);
                         let mut markdown = item_widget.markdown(cx, ids!(selectable));
-                        // wrap_bare_latex wraps `\cmd{…}` with `$…$` so
-                        // MathView can render them.
-                        let unwrapped = unwrap_outer_markdown_fence(&msg.text);
-                        let rendered = wrap_bare_latex(unwrapped);
                         let empty_state = CardState::new();
                         let card_state = data.a2app_state.get(&item_id).unwrap_or(&empty_state);
-                        let rendered = resolve_a2app_card(&rendered, item_id, card_state);
-                        markdown.set_text(cx, &rendered);
+                        // Only re-resolve + re-parse the card when its inputs actually
+                        // change (new message or card state) — NOT every draw. Skipping
+                        // this on scroll frames (nothing changed) is what keeps scrolling
+                        // smooth; otherwise the whole DSL is re-parsed ~30ms every frame.
+                        let unchanged = matches!(
+                            &self.rendered_cache,
+                            Some((cid, ctext, cstate))
+                                if *cid == item_id && ctext == &msg.text && cstate == card_state
+                        );
+                        if !unchanged {
+                            // wrap_bare_latex wraps `\cmd{…}` with `$…$` so MathView can
+                            // render them.
+                            let unwrapped = unwrap_outer_markdown_fence(&msg.text);
+                            let rendered = wrap_bare_latex(unwrapped);
+                            let rendered = resolve_a2app_card(&rendered, item_id, card_state);
+                            markdown.set_text(cx, &rendered);
+                            self.rendered_cache =
+                                Some((item_id, msg.text.clone(), card_state.clone()));
+                        }
                         if is_animating {
                             markdown.stop_streaming_animation();
                         }
@@ -3071,6 +3337,11 @@ pub struct App {
     /// Set by delta handlers; cleared when the tick repaints.
     #[rust]
     stream_dirty: bool,
+    /// Layer 3 — a background app's badge/title changed during this event
+    /// drain; the switcher strip is re-synced once after the drain (rather than
+    /// per streaming delta). Cleared by the flush.
+    #[rust]
+    tabs_dirty: bool,
     /// "A2App" composer toggle: when on, the next message is wrapped with the
     /// Splash UI-generation prompt so the LLM returns a `runsplash` block that
     /// renders as live UI.
@@ -3091,10 +3362,32 @@ pub struct App {
     /// dynamic dispatch over LLM backends. Lazily constructed on first use.
     #[rust]
     agent: Option<Box<dyn Agent>>,
+    /// Open apps, each backed by an octos session. Empty until the first
+    /// session opens (`clear_chat` at boot pushes the first). Layer 3 / W08.
     #[rust]
-    session_id: Option<SessionId>,
+    apps: Vec<AppRecord>,
+    /// Index into `apps` of the visible (foreground) app. Only meaningful when
+    /// `apps` is non-empty; the `fg*` accessors return `None`/no-op otherwise.
     #[rust]
-    current_prompt: Option<PromptId>,
+    foreground: usize,
+    /// AMA (Activity Management Agent) session — the routing brain, running
+    /// CONCURRENTLY with the app agents. Every user intent is broadcast to both
+    /// the AMA and the app agents; the AMA classifies which app should own the
+    /// screen. MVP: it renders nothing (its stream is logged, not shown).
+    #[rust]
+    ama_session: Option<SessionId>,
+    /// The AMA's in-flight classification turn (so its stream is routed to the
+    /// AMA log, never to the visible CHAT_DATA).
+    #[rust]
+    ama_prompt: Option<PromptId>,
+    /// Accumulates the AMA's streamed routing decision for logging.
+    #[rust]
+    ama_text: String,
+    /// The user intent captured at submit, held while the AMA classifies it. On
+    /// the AMA's TurnComplete we dispatch this to the routed domain agent (that
+    /// agent then generates its card and takes the screen). None when idle.
+    #[rust]
+    pending_intent: Option<String>,
     /// Currently-selected Octos profile id (X-Profile-Id on the wire).
     /// `None` until W08 hydrates the profile list. Used by `update_status`.
     #[rust]
@@ -3138,6 +3431,92 @@ pub struct App {
 }
 
 impl App {
+    // ---- Layer 3 (W08 Phase 2) — foreground-app accessors -----------------
+    //
+    // These replace the old single `session_id` / `current_prompt` fields.
+    // `apps[foreground]` is the source of truth for the visible app; the
+    // helpers keep the ~dozen call sites terse and make "which app owns this
+    // event" explicit (streaming events carry a `prompt_id`, not a session id).
+
+    /// The visible app, if any (`None` before the first session opens).
+    fn fg(&self) -> Option<&AppRecord> {
+        self.apps.get(self.foreground)
+    }
+    fn fg_mut(&mut self) -> Option<&mut AppRecord> {
+        let i = self.foreground;
+        self.apps.get_mut(i)
+    }
+    /// Foreground session id (replaces the old single `session_id` field).
+    fn fg_session(&self) -> Option<SessionId> {
+        self.fg().map(|a| a.session_id)
+    }
+    /// Take the foreground app's in-flight prompt (used by cancel).
+    fn fg_prompt_take(&mut self) -> Option<PromptId> {
+        self.fg_mut().and_then(|a| a.current_prompt.take())
+    }
+    /// Set the foreground app's in-flight prompt (replaces `current_prompt =`).
+    fn set_fg_prompt(&mut self, p: Option<PromptId>) {
+        if let Some(a) = self.fg_mut() {
+            a.current_prompt = p;
+        }
+    }
+    /// Index of the app whose in-flight turn is `prompt_id`, if any tracks it.
+    /// `None` means orphan (cancelled/stale) — callers treat that as foreground
+    /// to preserve the pre-Layer-3 single-app fallback behavior.
+    fn app_of_prompt(&self, prompt_id: PromptId) -> Option<usize> {
+        self.apps
+            .iter()
+            .position(|a| a.current_prompt == Some(prompt_id))
+    }
+    /// Bring the app holding `sid` to the foreground, opening a light record if
+    /// this session isn't an app yet. Clears its unread badge. Path B: the
+    /// caller then hydrates `CHAT_DATA` from this session's server history.
+    fn focus_session(&mut self, sid: SessionId, title: impl Into<String>) {
+        match self.apps.iter().position(|a| a.session_id == sid) {
+            Some(i) => self.foreground = i,
+            None => {
+                self.apps.push(AppRecord::new(sid, title));
+                self.foreground = self.apps.len() - 1;
+            }
+        }
+        if let Some(a) = self.fg_mut() {
+            a.has_updates = false;
+        }
+    }
+
+    /// AMA "decision → activation": the AMA classified the held `pending_intent`
+    /// into `app_id` (a domain). Activate the app agent whose `domain` matches —
+    /// foreground it and dispatch the domain-specialised generation prompt to it,
+    /// so THAT agent generates its card and takes the screen. An unknown domain
+    /// (e.g. "none") renders nothing.
+    fn route_to_app(&mut self, cx: &mut Cx, app_id: &str, decision: &str) {
+        let Some(intent) = self.pending_intent.take() else {
+            return;
+        };
+        let Some(idx) = self
+            .apps
+            .iter()
+            .position(|a| a.domain.as_deref() == Some(app_id))
+        else {
+            log::info!("AMA → route: {app_id:?} (no app agent for this domain) | {decision}");
+            CHAT_DATA.write().unwrap().is_streaming = false;
+            self.ui.redraw(cx);
+            return;
+        };
+        log::info!("AMA → activate '{app_id}' app agent (idx {idx}) | {decision}");
+        // This domain agent takes the screen.
+        self.foreground = idx;
+        // New foreground → drop ChatList's render cache so the card re-parses.
+        CHAT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Dispatch the domain-specialised generation prompt to the chosen agent.
+        let sid = self.apps[idx].session_id;
+        let prompt = app_splash_router_for(app_id, &intent);
+        let pid = self.agent.as_mut().unwrap().send_prompt(cx, sid, &prompt);
+        self.apps[idx].current_prompt = Some(pid);
+        self.sync_app_tabs(cx);
+        self.ui.redraw(cx);
+    }
+
     /// Construct an `OctosUiAgent` from the current process environment.
     /// W08 will plumb the bearer + profile through `octos-app-store::auth`
     /// and the keychain; for now we read placeholders so the binary boots
@@ -3290,6 +3669,7 @@ impl App {
                     bearer,
                     profile_id,
                     cursor: None,
+                    cursor_file: Self::cursor_file_path(),
                     requested_capabilities: Capabilities::requested(),
                     workspace_cwd: Self::current_workspace_cwd(),
                     stdio: Self::stdio_spawn(),
@@ -3317,10 +3697,20 @@ impl App {
             bearer,
             profile_id,
             cursor: None,
+            cursor_file: Self::cursor_file_path(),
             requested_capabilities: Capabilities::requested(),
             workspace_cwd: Self::current_workspace_cwd(),
             stdio: Self::stdio_spawn(),
         }
+    }
+
+    /// Where per-session replay cursors persist (W08) so they survive a transport
+    /// re-spawn / app restart — under the app's HOME, next to the saved cards.
+    /// `None` (no HOME) falls back to in-memory cursors.
+    fn cursor_file_path() -> Option<std::path::PathBuf> {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| std::path::PathBuf::from(h).join("a2app-cursors.json"))
     }
 
     /// Build the stdio-transport spawn spec. On Android the app runs the
@@ -3345,11 +3735,47 @@ impl App {
             return None;
         }
         let home = std::path::PathBuf::from("/data/user/0/dev.makepad.octos_app/files/octos-home");
+        // Ensure HOME exists BEFORE spawning: `Command::spawn` chdir's into
+        // `cwd` before exec, so a missing octos-home makes the spawn fail with
+        // ENOENT ("No such file or directory") even though the binary is fine —
+        // and since the server never starts, it never creates octos-home, so the
+        // failure is permanent once the dir is absent (e.g. after `pm clear`).
+        // Creating it here makes the spawn robust regardless of data state.
+        if let Err(e) = std::fs::create_dir_all(&home) {
+            log::warn!("stdio: could not create HOME {}: {e}", home.display());
+        }
         log::info!("stdio: octos={} HOME={}", program.display(), home.display());
+        // OCTOS_SKILLS_PATH adds the a2app memory dir as a skill READ-ZONE
+        // (config.rs plugin_dirs_from_project → skill_read_zones), so the
+        // splash-gen sub-agent's read_file can reach it by absolute path even
+        // though file tools are otherwise fenced to the per-session workspace.
+        let a2app = home.join("a2app").to_string_lossy().into_owned();
+        let mut env = vec![
+            ("HOME".to_owned(), home.to_string_lossy().into_owned()),
+            ("OCTOS_SKILLS_PATH".to_owned(), a2app),
+            // TEMP diagnostics: surface the embedded server's INFO trace
+            // (subagent token counts, stop_reason) to logcat via the
+            // stderr→log::info bridge, to pin the serve-relay truncation.
+            ("RUST_LOG".to_owned(), "info".to_owned()),
+        ];
+        // Route octos's LLM HTTPS through a proxy when the device itself has no
+        // internet route — e.g. an `adb reverse` tunnel to the dev host, which
+        // reaches api.z.ai. Set via launch intent extra `makepad.OCTOS_PROXY`
+        // (→ env MAKEPAD_OCTOS_PROXY, e.g. "http://127.0.0.1:8899"). reqwest
+        // honours HTTP(S)_PROXY and CONNECT-tunnels HTTPS through it.
+        if let Ok(proxy) = std::env::var("MAKEPAD_OCTOS_PROXY") {
+            let proxy = proxy.trim().to_owned();
+            if !proxy.is_empty() {
+                log::info!("stdio: octos LLM proxy = {proxy}");
+                for k in ["HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY"] {
+                    env.push((k.to_owned(), proxy.clone()));
+                }
+            }
+        }
         Some(StdioSpawn {
             program,
             args: vec!["serve".to_owned(), "--stdio".to_owned()],
-            env: vec![("HOME".to_owned(), home.to_string_lossy().into_owned())],
+            env,
             cwd: Some(home),
         })
     }
@@ -3378,10 +3804,10 @@ impl App {
     }
 
     fn current_workspace_cwd() -> Option<String> {
-        // Android: the process cwd is `/`, which the server's session
-        // workspace policy rejects ("failed to bootstrap session workspace
-        // policy"). No meaningful workspace exists on-device — omit it and
-        // let the server pick the profile default.
+        // Android: leave the per-session workspace default. a2app memory is made
+        // reachable via OCTOS_SKILLS_PATH (a skill read-zone) in stdio_spawn(),
+        // which is honored regardless of the workspace (the `session.workspace_cwd`
+        // path was not applied by the embedded serve).
         #[cfg(target_os = "android")]
         {
             None
@@ -3433,14 +3859,183 @@ impl App {
         self.sync_composer(cx);
 
         if let Some(agent) = &mut self.agent {
-            let config = SessionConfig {
+            let app_cfg = || SessionConfig {
                 system_prompt: Some(OCTOS_PLACEHOLDER_SYSTEM_PROMPT.to_string()),
                 ..Default::default()
             };
-            self.session_id = Some(agent.create_session(cx, config));
+            // ONE app agent PER DOMAIN, all live concurrently; each is its own
+            // octos session so its context stays dedicated to its domain. The
+            // AMA's routing decision activates the matching one (decision →
+            // activation). `foreground` = whichever last took the screen.
+            let weather = agent.create_session(cx, app_cfg());
+            let stock = agent.create_session(cx, app_cfg());
+            let news = agent.create_session(cx, app_cfg());
+            self.apps = vec![
+                AppRecord::with_domain(weather, "Weather", "weather"),
+                AppRecord::with_domain(stock, "Stock", "stock"),
+                AppRecord::with_domain(news, "News", "news"),
+            ];
+            self.foreground = 0;
+            self.pending_intent = None;
+            // The AMA (routing brain) is its OWN concurrent session.
+            let ama_config = SessionConfig {
+                system_prompt: Some(AMA_SYSTEM_PROMPT.to_string()),
+                ..Default::default()
+            };
+            self.ama_session = Some(agent.create_session(cx, ama_config));
+            log::info!("AMA + 3 domain app agents (weather/stock/news) created concurrently");
         }
         self.update_empty_state_visibility(cx);
+        self.sync_app_tabs(cx);
         self.ui.redraw(cx);
+    }
+
+    /// Wipe the shared conversation surface (`CHAT_DATA`). Shared by
+    /// `clear_chat`, `open_new_app`, and `switch_to_app`.
+    fn wipe_chat_surface(&mut self) {
+        let mut data = CHAT_DATA.write().unwrap();
+        data.messages.clear();
+        data.streaming_text.clear();
+        data.thinking_text.clear();
+        data.is_streaming = false;
+        data.a2app_state.clear();
+        data.save_to_disk();
+        CHAT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Snapshot the shared `CHAT_DATA` into app `i`'s record — call before
+    /// leaving app `i` in the foreground so switching back restores it.
+    fn snapshot_into(&mut self, i: usize) {
+        if let Some(a) = self.apps.get_mut(i) {
+            let data = CHAT_DATA.read().unwrap();
+            a.saved_messages = data.messages.clone();
+            a.saved_a2app = data.a2app_state.clone();
+            log::info!(
+                "snapshot_into app {i}: {} msgs, {} card-states",
+                a.saved_messages.len(),
+                a.saved_a2app.len()
+            );
+        }
+    }
+
+    /// Restore app `i`'s snapshot into the shared `CHAT_DATA` — call after
+    /// making app `i` the foreground.
+    fn restore_from(&self, i: usize) {
+        if let Some(a) = self.apps.get(i) {
+            let mut data = CHAT_DATA.write().unwrap();
+            data.messages = a.saved_messages.clone();
+            data.a2app_state = a.saved_a2app.clone();
+            data.streaming_text.clear();
+            data.thinking_text.clear();
+            data.is_streaming = false;
+            data.save_to_disk();
+            log::info!(
+                "restore_from app {i}: {} msgs, {} card-states",
+                data.messages.len(),
+                data.a2app_state.len()
+            );
+        }
+        // Force ChatList to re-parse the restored card (drop its render cache).
+        CHAT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Layer 3.2 — open ANOTHER app: a fresh octos session that becomes the
+    /// foreground while the existing apps stay open in the background. Unlike
+    /// `clear_chat` (which resets to a single app), this PUSHES a record.
+    fn open_new_app(&mut self, cx: &mut Cx) {
+        if self.agent.is_none() {
+            return;
+        }
+        // Snapshot the app we're leaving so switching back restores its card.
+        if !self.apps.is_empty() {
+            let prev = self.foreground;
+            self.snapshot_into(prev);
+        }
+        let config = SessionConfig {
+            system_prompt: Some(OCTOS_PLACEHOLDER_SYSTEM_PROMPT.to_string()),
+            ..Default::default()
+        };
+        let sid = self.agent.as_mut().unwrap().create_session(cx, config);
+        let n = self.apps.len() + 1;
+        self.apps.push(AppRecord::new(sid, format!("App {n}")));
+        self.foreground = self.apps.len() - 1;
+        // Fresh foreground app → clear the shared surface; re-prime the manual.
+        self.wipe_chat_surface();
+        self.splash_primed = false;
+        self.composer_shown = true;
+        self.sync_composer(cx);
+        self.update_empty_state_visibility(cx);
+        self.sync_app_tabs(cx);
+        self.collapse_sidebar_if_narrow(cx);
+        self.ui.redraw(cx);
+    }
+
+    /// Layer 3.3 — bring already-open app `i` to the foreground (Path A-lite
+    /// snapshot/restore). Snapshots the outgoing app's `CHAT_DATA`, then
+    /// restores app `i`'s saved conversation. Instant and fully offline — no
+    /// server round-trip. (`resume_session`/hydrate remains available for the
+    /// online/multi-device case; the sidebar session list still uses it.)
+    fn switch_to_app(&mut self, cx: &mut Cx, i: usize) {
+        if i >= self.apps.len() {
+            return;
+        }
+        if i == self.foreground {
+            // Re-tapping the current tab just clears its unread badge.
+            if let Some(a) = self.fg_mut() {
+                a.has_updates = false;
+            }
+            self.sync_app_tabs(cx);
+            return;
+        }
+        // Snapshot the app we're leaving, then enter and restore app `i`.
+        let prev = self.foreground;
+        self.snapshot_into(prev);
+        self.foreground = i;
+        if let Some(a) = self.apps.get_mut(i) {
+            a.has_updates = false;
+        }
+        self.restore_from(i);
+        self.splash_primed = false;
+        // A restored app with content shows its card full-screen (composer
+        // collapsed to the pill); an empty app opens in compose mode.
+        let count = { CHAT_DATA.read().unwrap().messages.len() };
+        self.composer_shown = count == 0;
+        self.sync_composer(cx);
+        self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
+        self.update_empty_state_visibility(cx);
+        self.sync_app_tabs(cx);
+        self.collapse_sidebar_if_narrow(cx);
+        self.update_status(cx);
+        if count > 0 {
+            let list = self
+                .ui
+                .widget(cx, ids!(chat_list))
+                .portal_list(cx, ids!(list));
+            list.set_tail_range(true);
+            list.set_first_id_and_scroll(count.saturating_sub(1), 0.0);
+            // Repaint burst so the restored card re-shapes and its background
+            // image decodes — the same trigger `TurnComplete` fires when a
+            // fresh card lands (a single redraw_all leaves the card blank).
+            self.settle_ticks = 0;
+            self.settle_timer = cx.start_interval(0.35);
+        }
+        cx.redraw_all();
+    }
+
+    /// Layer 3.3 — reflect the `apps`/`foreground` state onto the fixed set of
+    /// tab-chip slots. The strip is hidden until a second app opens (keeps the
+    /// single-app full-screen look). Foreground chip is marked `▸`; a
+    /// background app with unseen output gets a `•` badge.
+    /// The visible switcher moved into the native composer pill (＋/⟳), so
+    /// there's no top strip to sync. Kept as a no-op hook: `open_new_app` /
+    /// `switch_to_app` / `clear_chat` still call it, and it logs app state for
+    /// on-device diagnosis. `_cx` unused now that no widget is updated.
+    fn sync_app_tabs(&mut self, _cx: &mut Cx) {
+        log::info!(
+            "apps={} fg={}",
+            self.apps.len(),
+            self.foreground
+        );
     }
 
     fn update_empty_state_visibility(&self, cx: &mut Cx) {
@@ -3477,12 +4072,29 @@ impl App {
     /// saved-card injection, streaming state and list scroll. Both the Makepad
     /// composer (`send_message`) and the native Android floating composer
     /// (`AndroidComposerSubmit`, routed from `handle_actions`) land here.
+    /// TEST/automation hook: `--es makepad.AUTO_PROMPT "<text>"` (env
+    /// MAKEPAD_AUTO_PROMPT) auto-submits ONE prompt once a session is open, so a
+    /// live LLM generation can be driven without touching the native composer via
+    /// adb input. Fires once (clears the env var). Session/open and turn/start
+    /// are ordered on the stdio pipe, so submitting right after `clear_chat` is
+    /// safe.
+    fn fire_auto_prompt(&mut self, cx: &mut Cx) {
+        if let Ok(p) = std::env::var("MAKEPAD_AUTO_PROMPT") {
+            std::env::remove_var("MAKEPAD_AUTO_PROMPT");
+            let p = p.trim().to_string();
+            if !p.is_empty() {
+                log::info!("AUTO_PROMPT: submitting {p:?}");
+                self.submit_prompt(cx, p);
+            }
+        }
+    }
+
     fn submit_prompt(&mut self, cx: &mut Cx, text: String) {
         if text.trim().is_empty() {
             return;
         }
 
-        if self.agent.is_none() || self.session_id.is_none() {
+        if self.agent.is_none() || self.fg_session().is_none() {
             return;
         }
 
@@ -3499,7 +4111,14 @@ impl App {
         };
         self.update_empty_state_visibility(cx);
 
-        let session_id = self.session_id.unwrap();
+        // Collapse the composer to its "+" button while the card generates — the
+        // answer renders full-screen behind it. On Android the native
+        // submitComposer() already collapsed for instant feedback; this keeps
+        // `composer_shown` in sync (and drives the desktop composer/pill).
+        self.composer_shown = false;
+        self.sync_composer(cx);
+
+        let session_id = self.fg_session().unwrap();
         let agent = self.agent.as_mut().unwrap();
 
         // Octos sessions are stateful server-side, so we don't inject
@@ -3509,44 +4128,41 @@ impl App {
         // Splash mode: the bubble shows the user's original `text`, but the
         // LLM receives the Splash UI-generation prompt + manual so it returns
         // a `runsplash` block the Markdown widget renders live.
-        let sent = if self.splash_mode {
-            let base = if self.splash_primed {
-                // Manual already in session history — send a short directive.
-                app_splash_followup(&text)
-            } else {
-                self.splash_primed = true;
-                app_splash_prompt(&text)
-            };
-            // Attach the user's saved named cards so the model can retrieve and
-            // refine one by name ("improve the weather card" → the weather-sf
-            // card's DSL is right here to edit and re-emit).
-            let saved = load_a2app_cards(6);
-            log::info!("a2app: injecting {} saved card(s) into prompt", saved.len());
-            if saved.is_empty() {
-                base
-            } else {
-                let mut lib = String::from(
-                    "\n\nYOUR SAVED CARDS — if this request refines/improves/changes one of \
-these, edit that card and return the FULL updated block KEEPING its exact \
-`// name:` line. NOTE: some saved cards are OLDER, simpler versions — for a \
-WEATHER card you MUST reproduce the FULL current template shown above in this \
-EXACT order: current block, then the 7-DAY FORECAST panel (each row a FIXED height 30), \
-then a MAPS ROW of two side-by-side tiles — the LIVE 卫星云图 satellite \
-(http_resource(sys.satellite())) and the LIVE 空气质量图 air-quality map (an Overlay of \
-http_resource(sys.basemap(LAT, LON)) under http_resource(sys.airmap(LAT, LON)) using the \
-city's real lat/lon) — then the frosted AIR QUALITY / UV / SUNRISE / SUNSET / HUMIDITY / \
-WIND detail grid, plus the `Feels __°` in the H/L line — UPGRADING an older saved card to \
-that richer structure AND order rather than copying its simpler/old-order layout verbatim:\n",
+        // Splash generation is server-side: a tiny router (in the MESSAGE — the
+        // profile system prompt buries it) tells the octos main agent to spawn the
+        // `splash-gen` sub-agent, which loads the per-appid memory under
+        // `octos-home/a2app/` in its own clean context and returns the `runsplash`
+        // block. No client-side manual/template/saved-card injection — that all
+        // lives in the a2app memory the sub-agent reads.
+        // AMA-first routing (splash mode): send the intent to the AMA to classify,
+        // and HOLD it. On the AMA's decision (`AgentEvent::TurnComplete` for
+        // `ama_prompt`) we activate the routed domain agent and dispatch the
+        // generation prompt to it — that's "decision → activation". Plain chat (or
+        // a missing AMA) still goes straight to the foreground agent.
+        let ama_session = self.ama_session;
+        let splash = self.splash_mode;
+        let (ama_pid, direct_pid) = if splash {
+            if let Some(ama) = ama_session {
+                let ama_msg = format!(
+                    "{AMA_SYSTEM_PROMPT}\n\nUser message: {text}\n\nYour one-line routing decision:"
                 );
-                for (name, dsl) in &saved {
-                    lib.push_str(&format!("\n[{name}]\n```runsplash\n{}\n```\n", dsl.trim()));
-                }
-                format!("{base}{lib}")
+                (Some(agent.send_prompt(cx, ama, &ama_msg)), None)
+            } else {
+                let sent = format!("{APP_SPLASH_ROUTER}\n\nUser request: {text}");
+                (None, Some(agent.send_prompt(cx, session_id, &sent)))
             }
         } else {
-            text.clone()
+            (None, Some(agent.send_prompt(cx, session_id, &text)))
         };
-        self.current_prompt = Some(agent.send_prompt(cx, session_id, &sent));
+        // `agent` borrow ends above; now touch `self` fields.
+        if let Some(ama_pid) = ama_pid {
+            self.ama_prompt = Some(ama_pid);
+            self.ama_text.clear();
+            self.pending_intent = Some(text.clone());
+        } else if let Some(pid) = direct_pid {
+            self.set_fg_prompt(Some(pid));
+        }
+        self.sync_app_tabs(cx);
         self.ui.view(cx, ids!(cancel_button)).set_visible(cx, true);
 
         let chat_list = self.ui.widget(cx, ids!(chat_list));
@@ -3557,7 +4173,8 @@ that richer structure AND order rather than copying its simpler/old-order layout
     }
 
     fn cancel_request(&mut self, cx: &mut Cx) {
-        if let (Some(agent), Some(prompt_id)) = (&mut self.agent, self.current_prompt.take()) {
+        let taken = self.fg_prompt_take();
+        if let (Some(agent), Some(prompt_id)) = (&mut self.agent, taken) {
             agent.cancel_prompt(cx, prompt_id);
 
             let mut data = CHAT_DATA.write().unwrap();
@@ -3587,15 +4204,19 @@ that richer structure AND order rather than copying its simpler/old-order layout
         #[cfg(target_os = "android")]
         {
             // The native floating composer overlay replaces the Makepad docked
-            // composer + reveal pill on Android. Keep both Makepad widgets
-            // hidden and let the native overlay (driven via Cx) float over the
-            // full-screen card. `composer_shown` no longer gates visibility —
-            // the native composer stays up so it floats over every card, which
-            // is the whole point (edge-to-edge card, composer on top).
-            let _ = self.composer_shown;
+            // composer + reveal pill on Android; keep both Makepad widgets hidden.
+            // The overlay stays present (it floats over every card); its SUB-state
+            // — full input pill vs collapsed "+" button — tracks `composer_shown`,
+            // so it shrinks to "+" while a card generates / after it renders and
+            // expands when the user taps "+".
             self.ui.widget(cx, ids!(composer)).set_visible(cx, false);
             self.ui.button(cx, ids!(reveal_pill)).set_visible(cx, false);
             cx.show_android_composer();
+            if self.composer_shown {
+                cx.expand_android_composer();
+            } else {
+                cx.collapse_android_composer();
+            }
             cx.redraw_all();
         }
         #[cfg(not(target_os = "android"))]
@@ -4509,6 +5130,9 @@ impl MatchEvent for App {
             self.show_screen_for_nav(cx);
             self.collapse_sidebar_if_narrow(cx);
         }
+        // Layer 3 (W08) — new-app / switch now live in the NATIVE composer pill
+        // (see the AndroidComposerNewApp/Switch action handlers above); no
+        // top-strip or sidebar buttons.
         // Top-bar ☰ — bring the collapsed sidebar back (or hide it again).
         if self.ui.button(cx, ids!(nav_toggle)).clicked(actions) {
             let sidebar = self.ui.view(cx, ids!(sidebar));
@@ -4538,6 +5162,46 @@ impl MatchEvent for App {
             {
                 let text = sub.text.clone();
                 self.submit_prompt(cx, text);
+            }
+            // Layer 3 — native composer "＋" / "⟳" controls (app management lives
+            // in the composer now; the screen is otherwise just the a2app card).
+            if action
+                .downcast_ref::<makepad_widgets::makepad_platform::event::AndroidComposerNewApp>()
+                .is_some()
+            {
+                self.open_new_app(cx);
+            }
+            if action
+                .downcast_ref::<makepad_widgets::makepad_platform::event::AndroidComposerSwitch>()
+                .is_some()
+            {
+                let n = self.apps.len();
+                if n > 1 {
+                    self.switch_to_app(cx, (self.foreground + 1) % n);
+                }
+            }
+            // Composer QR scan → provision the LLM from the decoded JSON payload,
+            // then respawn the kernel so the new provider/key takes effect.
+            if let Some(scan) = action
+                .downcast_ref::<makepad_widgets::makepad_platform::event::AndroidQrScanned>()
+            {
+                let json = scan.json.clone();
+                match crate::app::login::apply_provision_config_json(&json) {
+                    Ok(what) => {
+                        log::info!("QR provisioned LLM: {what}");
+                        self.connect_transport(cx); // respawn kernel → reads new _main.json
+                        self.clear_chat(cx);
+                        self.ui
+                            .label(cx, ids!(status_label))
+                            .set_text(cx, &format!("LLM configured · {what}"));
+                    }
+                    Err(e) => {
+                        log::warn!("QR provision failed: {e}");
+                        self.ui
+                            .label(cx, ids!(status_label))
+                            .set_text(cx, &format!("QR error: {e}"));
+                    }
+                }
             }
         }
 
@@ -4630,6 +5294,7 @@ impl MatchEvent for App {
                         // Pick up the fresh bearer without an app restart.
                         self.connect_transport(cx);
                         self.clear_chat(cx);
+                        self.fire_auto_prompt(cx);
                     }
                 }
             }
@@ -4663,7 +5328,7 @@ impl MatchEvent for App {
             if let Some(h) =
                 action.downcast_ref::<crate::backend::octos_ui::SessionResumeHydrated>()
             {
-                if self.session_id == Some(h.session_id) {
+                if self.fg_session() == Some(h.session_id) {
                     let count = {
                         let mut data = CHAT_DATA.write().unwrap();
                         data.messages = h
@@ -4734,8 +5399,10 @@ impl MatchEvent for App {
                         .as_mut()
                         .and_then(|agent| agent.resume_session(cx, &id.0));
                     if let Some(sid) = resumed {
-                        self.session_id = Some(sid);
-                        self.current_prompt = None;
+                        // Switch foreground to the resumed session (open a
+                        // record if it isn't an app yet). Path B: the hydrate
+                        // reply (SessionResumeHydrated) refills CHAT_DATA below.
+                        self.focus_session(sid, "Session");
                         {
                             let mut data = CHAT_DATA.write().unwrap();
                             data.messages.clear();
@@ -5057,6 +5724,22 @@ impl MatchEvent for App {
             std::env::set_var("HOME", &dir);
         }
 
+        // Provisioning deploy (non-rooted devices): `makepad.PROVISION_DIR`
+        // (→ env MAKEPAD_PROVISION_DIR) names a world-readable staging dir
+        // (`adb push …/octos-provision`) whose tree is copied into the app's
+        // octos-home BEFORE octos spawns — deploying the GLM profile + a2app
+        // memory tree onto a device that can't be written via su/run-as.
+        #[cfg(target_os = "android")]
+        if let Ok(src) = std::env::var("MAKEPAD_PROVISION_DIR") {
+            let home = std::path::PathBuf::from(
+                "/data/user/0/dev.makepad.octos_app/files/octos-home",
+            );
+            match deploy_provision(std::path::Path::new(&src), &home) {
+                Ok(n) => log::info!("provision: deployed {n} files from {src}"),
+                Err(e) => log::warn!("provision: deploy from {src} failed: {e}"),
+            }
+        }
+
         // No-UI provisioning: a `makepad.APP_CONFIG` launch-intent extra
         // (`adb shell am start … --es makepad.APP_CONFIG
         // 'http://host:port|profile|token'`) surfaces here as the
@@ -5070,6 +5753,18 @@ impl MatchEvent for App {
                 Err(e) => log::warn!("provisioning failed: {e}"),
             }
         }
+        // QR / intent LLM provisioning: a `makepad.PROVISION_CONFIG` extra (a JSON
+        // payload `{"llm_family":..,"llm_model":..,"llm_key":..}`, the same content
+        // the composer's QR scan yields) writes the provider + key into the octos
+        // profile config BEFORE the kernel spawns below, so the first turn uses it.
+        if let Ok(cfg) = std::env::var("MAKEPAD_PROVISION_CONFIG") {
+            match crate::app::login::apply_provision_config_json(&cfg) {
+                Ok(what) => log::info!("provisioned LLM from intent: {what}"),
+                Err(e) => log::warn!("LLM provisioning failed: {e}"),
+            }
+            std::env::remove_var("MAKEPAD_PROVISION_CONFIG");
+        }
+
 
         // Construct the OctosUiAgent up-front so the chat surface has
         // somewhere to send a prompt (config/token state as currently on
@@ -5113,9 +5808,32 @@ impl MatchEvent for App {
         if authed {
             // Open the first session immediately so the composer is live.
             self.clear_chat(cx);
+            self.fire_auto_prompt(cx);
         } else {
             self.auto_solo_login(cx);
         }
+        // TEST-ONLY: seed a canned `runsplash` card from a file (bypasses the
+        // server/LLM) so on-device render/scroll/map tests don't depend on card
+        // generation. `--es makepad.SEED_CARD_FILE <app-readable path>` surfaces as
+        // MAKEPAD_SEED_CARD_FILE. Push AFTER the boot decision above (clear_chat
+        // wipes CHAT_DATA), then refresh the empty-state + redraw so it shows.
+        if let Ok(path) = std::env::var("MAKEPAD_SEED_CARD_FILE") {
+            match std::fs::read_to_string(&path) {
+                Ok(body) => {
+                    if let Ok(mut data) = CHAT_DATA.write() {
+                        data.messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            text: format!("```runsplash\n{}\n```", body.trim()),
+                        });
+                    }
+                    self.update_empty_state_visibility(cx);
+                    cx.redraw_all();
+                    log::info!("SEED_CARD injected {} bytes from {path}", body.len());
+                }
+                Err(e) => log::warn!("SEED_CARD_FILE read failed: {e}"),
+            }
+        }
+
         // Phone boot: land on the chat surface, not the menu — ☰ opens it.
         self.collapse_sidebar_if_narrow(cx);
         // Settle composer visibility now (not only via the auth→clear_chat
@@ -5277,7 +5995,24 @@ impl AppMain for App {
                             .label(cx, ids!(status_label))
                             .set_text(cx, &format!("Error: {}", error));
                     }
-                    AgentEvent::TextDelta { text, .. } => {
+                    AgentEvent::TextDelta { prompt_id, text } => {
+                        // AMA MVP: the AMA's stream is routing metadata — collect
+                        // it for the log, never render it to the screen.
+                        if Some(prompt_id) == self.ama_prompt {
+                            self.ama_text.push_str(&text);
+                            continue;
+                        }
+                        // Layer 3 foreground guard: a delta for a BACKGROUND app
+                        // must not stream into the shared CHAT_DATA — badge it
+                        // and skip. Orphan prompts (None) fall through as the
+                        // pre-Layer-3 single-app behavior.
+                        if let Some(i) = self.app_of_prompt(prompt_id) {
+                            if i != self.foreground {
+                                self.apps[i].has_updates = true;
+                                self.tabs_dirty = true;
+                                continue;
+                            }
+                        }
                         // Perf: tokens arrive far faster than 60 fps, and the
                         // draw path re-parses the whole accumulated reply —
                         // so only accumulate here and let the ~10 Hz
@@ -5294,7 +6029,18 @@ impl AppMain for App {
                             cx.redraw_all();
                         }
                     }
-                    AgentEvent::ThinkingDelta { text, .. } => {
+                    AgentEvent::ThinkingDelta { prompt_id, text } => {
+                        if Some(prompt_id) == self.ama_prompt {
+                            continue;
+                        }
+                        // Foreground guard (see TextDelta).
+                        if let Some(i) = self.app_of_prompt(prompt_id) {
+                            if i != self.foreground {
+                                self.apps[i].has_updates = true;
+                                self.tabs_dirty = true;
+                                continue;
+                            }
+                        }
                         let first = {
                             let mut data = CHAT_DATA.write().unwrap();
                             let first = data.thinking_text.is_empty();
@@ -5313,7 +6059,38 @@ impl AppMain for App {
                             cx.redraw_all();
                         }
                     }
-                    AgentEvent::TurnComplete { .. } => {
+                    AgentEvent::TurnComplete { prompt_id, .. } => {
+                        // AMA MVP: the AMA's turn finished — parse + apply its
+                        // routing decision (proves the routing brain ran
+                        // concurrently with the app agent), render nothing.
+                        if Some(prompt_id) == self.ama_prompt {
+                            let decision = self.ama_text.trim().to_string();
+                            // The AMA answers `<appid> — <reason>` (or `none`).
+                            // Take the leading app id (up to the first dash/space).
+                            let app_id = decision
+                                .split(|c: char| c == '—' || c == '-' || c.is_whitespace())
+                                .next()
+                                .unwrap_or("")
+                                .to_ascii_lowercase();
+                            self.ama_prompt = None;
+                            // decision → activation: hand the held intent to the app
+                            // agent whose domain matches, foreground it, and let it
+                            // generate its card.
+                            self.route_to_app(cx, &app_id, &decision);
+                            continue;
+                        }
+                        // Foreground guard: a BACKGROUND app finishing must not
+                        // steal the foreground's streaming_text or render into
+                        // CHAT_DATA. Clear that app's prompt, badge it, skip —
+                        // its card is on the server ledger and hydrates on switch.
+                        if let Some(i) = self.app_of_prompt(prompt_id) {
+                            if i != self.foreground {
+                                self.apps[i].current_prompt = None;
+                                self.apps[i].has_updates = true;
+                                self.tabs_dirty = true;
+                                continue;
+                            }
+                        }
                         let mut data = CHAT_DATA.write().unwrap();
                         let text = std::mem::take(&mut data.streaming_text);
                         log!(
@@ -5354,7 +6131,7 @@ impl AppMain for App {
                         data.save_to_disk();
                         drop(data);
 
-                        self.current_prompt = None;
+                        self.set_fg_prompt(None);
                         self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
                         self.update_empty_state_visibility(cx);
                         // A card just rendered — collapse the floating composer to
@@ -5384,7 +6161,24 @@ impl AppMain for App {
                             self.settle_timer = cx.start_interval(0.35);
                         }
                     }
-                    AgentEvent::PromptError { error, .. } => {
+                    AgentEvent::PromptError { prompt_id, error } => {
+                        if Some(prompt_id) == self.ama_prompt {
+                            log::warn!("AMA turn error: {error} — falling back to weather");
+                            self.ama_prompt = None;
+                            // Don't strand the held intent: route to a default.
+                            self.route_to_app(cx, "weather", "AMA error fallback");
+                            continue;
+                        }
+                        // Foreground guard: a BACKGROUND app's error clears its
+                        // prompt + badges it; it must not write CHAT_DATA.
+                        if let Some(i) = self.app_of_prompt(prompt_id) {
+                            if i != self.foreground {
+                                self.apps[i].current_prompt = None;
+                                self.apps[i].has_updates = true;
+                                self.tabs_dirty = true;
+                                continue;
+                            }
+                        }
                         log!("aichat UI prompt error: {}", error);
                         {
                             let mut data = CHAT_DATA.write().unwrap();
@@ -5396,7 +6190,7 @@ impl AppMain for App {
                             data.thinking_text.clear();
                             data.save_to_disk();
                         }
-                        self.current_prompt = None;
+                        self.set_fg_prompt(None);
                         self.ui.view(cx, ids!(cancel_button)).set_visible(cx, false);
                         self.update_empty_state_visibility(cx);
                         self.ui
@@ -5409,6 +6203,12 @@ impl AppMain for App {
             }
         }
 
+        // Layer 3 — flush any switcher badge/title changes accumulated during
+        // this drain (batched so background streaming doesn't re-sync per delta).
+        if self.tabs_dirty {
+            self.tabs_dirty = false;
+            self.sync_app_tabs(cx);
+        }
         // W04 follow-up #3 — refresh the top-bar connection indicator each
         // tick. `OctosUiAgent` mirrors transport `ConnectionState` into
         // `APP_STATE.connection`; reading it here keeps the dot in sync

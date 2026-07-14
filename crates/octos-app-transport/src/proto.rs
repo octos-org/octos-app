@@ -16,7 +16,10 @@ use octos_core::ui_protocol::{
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
+use octos_core::SessionKey;
+
 use crate::capability::Capabilities;
+use crate::cursor::{CursorPersist, CursorStore};
 use crate::jsonrpc::{serialize_request, JsonRpcId, RpcEnvelope, RpcRegistry};
 use crate::{ConnectionState, LifecycleResult, OutboundCommand, TransportEvent};
 
@@ -44,15 +47,27 @@ pub(crate) enum PendingReply {
 /// Per-connection mutable state: the replay cursor, in-flight requests keyed
 /// by JSON-RPC id, and the id registry.
 pub(crate) struct SharedState {
-    pub(crate) cursor: Option<UiCursor>,
+    /// Per-session replay cursors (W08 multi-session). Keyed by `SessionKey`
+    /// so concurrent live sessions never clobber each other's replay position.
+    pub(crate) cursors: CursorStore,
+    /// One-shot legacy seed: the single `TransportConfig.cursor` (usually None),
+    /// applied to the first bracketed `session/open` that has no stored cursor.
+    pub(crate) pending_initial: Option<UiCursor>,
     pub(crate) pending: HashMap<JsonRpcId, PendingRequest>,
     pub(crate) registry: std::sync::Arc<RpcRegistry>,
 }
 
 impl SharedState {
-    pub(crate) fn new(cursor: Option<UiCursor>) -> Self {
+    pub(crate) fn new(
+        cursor: Option<UiCursor>,
+        persist: Option<std::sync::Arc<dyn CursorPersist>>,
+    ) -> Self {
         Self {
-            cursor,
+            cursors: match persist {
+                Some(p) => CursorStore::new_persisted(p),
+                None => CursorStore::new(),
+            },
+            pending_initial: cursor,
             pending: HashMap::new(),
             registry: std::sync::Arc::new(RpcRegistry::new()),
         }
@@ -85,17 +100,23 @@ pub(crate) fn build_outbound(cmd: OutboundCommand, shared: &mut SharedState) -> 
     let id = shared.registry.next_id();
     let (method, body, pending): (&'static str, Value, Option<PendingReply>) = match cmd {
         OutboundCommand::OpenSession(mut params) => {
-            // Resume bracket: replay from the last in-memory cursor when one exists.
+            // Resume bracket: replay from THIS session's last cursor (W08
+            // multi-session), falling back to the one-shot legacy seed for the
+            // very first open. Per-session so concurrent sessions never share a
+            // cursor.
             if params.after.is_none() {
-                params.after = shared.cursor.clone();
+                params.after = shared
+                    .cursors
+                    .get(&params.session_id)
+                    .cloned()
+                    .or_else(|| shared.pending_initial.take());
             }
             (methods::SESSION_OPEN, to_value(&params), Some(PendingReply::Lifecycle))
         }
         OutboundCommand::OpenSessionFresh(params) => {
-            // Session switch: the tracked cursor belongs to the PREVIOUS
-            // session — don't bracket, and drop it so future replays track
-            // the session being opened instead.
-            shared.cursor = None;
+            // Open WITHOUT a replay bracket (`params.after` stays None). With
+            // per-session cursors (W08) there is no shared cursor to reset —
+            // every other session keeps its own replay position.
             (methods::SESSION_OPEN, to_value(&params), Some(PendingReply::Lifecycle))
         }
         OutboundCommand::StartTurn(p) => {
@@ -353,7 +374,14 @@ async fn handle_notification(
         .get("cursor")
         .and_then(|v| serde_json::from_value::<UiCursor>(v.clone()).ok());
     if let Some(c) = cursor.clone() {
-        shared.cursor = Some(c);
+        // W08: advance the cursor for THIS notification's session only, so
+        // concurrent live sessions don't overwrite each other's replay position.
+        if let Some(session) = params
+            .get("session_id")
+            .and_then(|v| serde_json::from_value::<SessionKey>(v.clone()).ok())
+        {
+            shared.cursors.set(session, c);
+        }
     }
     emit_durable_notification(events, payload, cursor).await;
 }

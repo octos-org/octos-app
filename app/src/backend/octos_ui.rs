@@ -69,6 +69,10 @@ pub struct OctosUiAgent {
     turn_ids: HashMap<PromptId, TurnId>,
     /// octos-core TurnId → Makepad PromptId (reverse lookup).
     prompt_ids: HashMap<TurnId, PromptId>,
+    /// W08: Makepad PromptId → the SessionKey that owns it, so `cancel_prompt`
+    /// (and future per-prompt ops) target the RIGHT session in a multi-session
+    /// client instead of guessing the "first" one.
+    prompt_sessions: HashMap<PromptId, SessionKey>,
     /// Most recent connection state — also mirrored into
     /// `APP_STATE.connection` (via `fold_connection_into_store`) for the
     /// top-bar status indicator and toast queue. Kept locally so we can
@@ -138,6 +142,7 @@ impl OctosUiAgent {
             ready_sessions: std::collections::HashSet::new(),
             turn_ids: HashMap::new(),
             prompt_ids: HashMap::new(),
+            prompt_sessions: HashMap::new(),
             connection_state: ConnectionState::Idle,
             capabilities: None,
             workspace_cwd,
@@ -259,6 +264,10 @@ impl OctosUiAgent {
                         }];
                     }
                 }
+                // W08 best-effort: an RPC error with no pending-request context
+                // can't be attributed to a specific session/prompt, so it lands
+                // on an arbitrary in-flight prompt. Precise routing would need
+                // the transport to carry session/turn on `RpcError` (follow-up).
                 if let Some(&pid) = self.prompt_ids.values().next() {
                     return vec![AgentEvent::PromptError {
                         prompt_id: pid,
@@ -453,6 +462,7 @@ impl OctosUiAgent {
                 .remove(&ev.turn_id)
                 .map(|pid| {
                     self.turn_ids.remove(&pid);
+                    self.prompt_sessions.remove(&pid);
                     vec![AgentEvent::TurnComplete {
                         prompt_id: pid,
                         stop_reason: StopReason::EndTurn,
@@ -464,6 +474,7 @@ impl OctosUiAgent {
                 .remove(&ev.turn_id)
                 .map(|pid| {
                     self.turn_ids.remove(&pid);
+                    self.prompt_sessions.remove(&pid);
                     vec![AgentEvent::PromptError {
                         prompt_id: pid,
                         error: format!("{}: {}", ev.code, ev.message),
@@ -578,6 +589,14 @@ impl Agent for OctosUiAgent {
         Some(session_id)
     }
 
+    /// The octos `SessionKey` string mapped to `session_id`. Layer 3: the
+    /// multi-app switcher created these sessions via `create_session` (which
+    /// returns only the local `SessionId`); this hands back the backend key so
+    /// the switcher can `resume_session` → hydrate on foreground switch.
+    fn backend_key(&self, session_id: SessionId) -> Option<String> {
+        self.session_keys.get(&session_id).map(|k| k.0.clone())
+    }
+
     fn send_prompt(&mut self, _cx: &mut Cx, session_id: SessionId, text: &str) -> PromptId {
         let prompt_id = PromptId::new();
         let turn_id = TurnId::new();
@@ -587,6 +606,9 @@ impl Agent for OctosUiAgent {
             log::warn!("octos-ui-agent: send_prompt for unknown session");
             return prompt_id;
         };
+        // W08: remember which session owns this prompt, so cancel/routing can
+        // target it without guessing.
+        self.prompt_sessions.insert(prompt_id, key.clone());
         self.post(OutboundCommand::StartTurn(TurnStartParams {
             session_id: key,
             turn_id,
@@ -626,10 +648,9 @@ impl Agent for OctosUiAgent {
         let Some(turn_id) = self.turn_ids.get(&prompt_id).cloned() else {
             return;
         };
-        // M1 has at most one session per agent (W08 will multiplex). Pick
-        // the first / only session_key for now; if there's no session, the
-        // server will never see a cancel without a prior `turn/start`.
-        let Some(key) = self.session_keys.values().next().cloned() else {
+        // W08: cancel the turn on the SESSION that owns this prompt (recorded
+        // in `send_prompt`) — not a guessed "first" session.
+        let Some(key) = self.prompt_sessions.get(&prompt_id).cloned() else {
             return;
         };
         self.post(OutboundCommand::InterruptTurn(TurnInterruptParams {
