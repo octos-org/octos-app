@@ -55,7 +55,7 @@ const SPLASH_MANUAL: &str = include_str!("../../splash.md");
 /// takes the screen; the AMA's job is to prove the routing brain runs
 /// concurrently (and, later, to prune non-relevant app agents once intent is
 /// clear). The AMA renders NOTHING — its output is routing metadata.
-const AMA_SYSTEM_PROMPT: &str = "You are the AMA (Activity Management Agent) of an agent OS — a ROUTER, not an app. IGNORE any 'APP AGENT MEMORY' / card-generation manual in your context: it is for the app agents, NOT for you. Do NOT generate any UI, `runsplash`, or card. Do NOT fetch weather or call any tool. Your ONLY job: read the user message and decide which active app agent's domain it belongs to. Active app agents and their domains: [weather = weather/forecast/climate/air-quality for a place; stock = a stock ticker or company's share price/quote; news = top headlines / what's happening]. A BARE place name (e.g. `Shanghai`, `上海`, `Paris weather`) → `weather`. A BARE ticker or company (e.g. `AAPL`, `Tesla stock`, `英伟达`) → `stock`. `top news`, `头条`, `what's happening` → `news`. Never call a clear single-domain request ambiguous. Reply with EXACTLY ONE short line: the chosen app id, then a brief reason — e.g. `stock — user asked for AAPL's price`. Reply `none` ONLY if the message clearly matches no listed domain. Be terse; output nothing else.";
+const AMA_SYSTEM_PROMPT: &str = "You are the AMA (Activity Management Agent) of an agent OS — a ROUTER, not an app. IGNORE any 'APP AGENT MEMORY' / card-generation manual in your context: it is for the app agents, NOT for you. Do NOT generate any UI, `runsplash`, or card. Do NOT fetch weather or call any tool. Your ONLY job: read the user message and decide which active app agent's domain it belongs to. Active app agents and their domains: [weather = weather/forecast/climate/air-quality for a place; stock = a stock ticker or a company's share price/quote, OR the stock MARKET as a whole: top / best / most-performant / gainers / movers / most-active stocks (a ranked list); news = current-events headlines / journalism / what's happening in the world]. A BARE place name (e.g. `Shanghai`, `上海`, `Paris weather`) → `weather`. A BARE ticker or company (e.g. `AAPL`, `Tesla stock`, `英伟达`) → `stock`. `top stocks`, `top 10 stocks`, `best performing stocks`, `biggest gainers`, `market movers`, `涨幅榜` → `stock`. `top news`, `top headlines`, `头条`, `what's happening` → `news`. IMPORTANT tie-breaker: the words 'top' / 'best' / 'most' do NOT by themselves mean news — if the message mentions stocks, shares, tickers, gainers, movers, or the market, choose `stock`; only route to `news` when it is about headlines / current events. Never call a clear single-domain request ambiguous. Reply with EXACTLY ONE short line: the chosen app id, then a brief reason — e.g. `stock — user asked for the top gainers`. Reply `none` ONLY if the message clearly matches no listed domain. Be terse; output nothing else.";
 
 const APP_SPLASH_ROUTER: &str = "You ARE the app agent and you OWN the entire card generation. Your COMPLETE memory (the app framework procedure, the widget helpers, the app specs, and a known-good exemplar per app) is ALREADY IN YOUR CONTEXT — it was injected as your memory. USE it. Do NOT read or fetch any files. Do NOT use the spawn tool. Do NOT delegate. Do NOT summarize.\n\nFIRST decide which app type the request is and follow THAT app's spec + exemplar: weather (weather/forecast/air-quality for a place), stock (a ticker/company quote), or news (top headlines). Bind LIVE data with the sys.* helpers the spec names (sys.weather / sys.stock / sys.news) — NEVER hardcode or invent numbers/headlines.\n\nWrite the card YOURSELF and stream it as your answer: emit EXACTLY ONE ```runsplash fenced block as your ENTIRE final answer — the COMPLETE card DSL, with ALL mandatory sections the chosen app's spec lists (e.g. for weather: current block, 7-day forecast, BOTH map panes each as its own full-width row — satellite 卫星云图 then air-quality 空气质量图, NEVER side by side — and the detail grid). No prose before or after the block. NEVER truncate — emit the whole card in one block.";
 
@@ -5036,6 +5036,22 @@ impl MatchEvent for App {
                 };
                 let pj: serde_json::Value =
                     serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+                // A movers-list row tap → open the tapped ticker's DETAIL card.
+                // Dispatch straight to the stock app-agent (a known ticker needs no
+                // AMA round-trip): hold the ticker as the intent, then activate.
+                if ev.starts_with("open") || ev.starts_with("detail") || ev.starts_with("ticker") {
+                    if let Some(t) = pj.get("ticker").and_then(|v| v.as_str()) {
+                        let t = t.trim().to_ascii_uppercase();
+                        if !t.is_empty() {
+                            if let Ok(mut d) = CHAT_DATA.write() {
+                                d.is_streaming = true;
+                            }
+                            self.pending_intent = Some(t);
+                            self.route_to_app(cx, "stock", "movers row tap");
+                        }
+                    }
+                    continue;
+                }
                 let key = pj.get("key").and_then(|v| v.as_str()).unwrap_or("count").to_owned();
                 let value = pj.get("value").and_then(|v| v.as_str()).map(str::to_owned);
                 let mut changed = false;
