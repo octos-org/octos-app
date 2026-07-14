@@ -3535,16 +3535,7 @@ impl App {
         // requests (incl. a row tap, whose intent is the bare symbol) fall through
         // to the agent below.
         if app_id == "stock" && is_movers_intent(&intent) {
-            if let Ok(mut data) = CHAT_DATA.write() {
-                data.messages.push(ChatMessage {
-                    role: ChatRole::Assistant,
-                    text: format!("```runsplash\n{}\n```", MOVERS_TEMPLATE.trim()),
-                });
-                data.is_streaming = false;
-            }
-            self.update_empty_state_visibility(cx);
-            self.sync_app_tabs(cx);
-            cx.redraw_all();
+            self.render_movers_template(cx);
             log::info!("stock: rendered movers TEMPLATE directly (no LLM) | intent {intent:?}");
             return;
         }
@@ -3555,6 +3546,24 @@ impl App {
         self.apps[idx].current_prompt = Some(pid);
         self.sync_app_tabs(cx);
         self.ui.redraw(cx);
+    }
+
+    /// Inject the movers-list TEMPLATE as the current card (rendered directly with
+    /// live `sys.movers` data — not LLM-generated). Used for movers intents
+    /// (`route_to_app`) and for a detail card's "back" button (see the Notify
+    /// handler), so both go to the same reliable, tappable list.
+    fn render_movers_template(&mut self, cx: &mut Cx) {
+        if let Ok(mut data) = CHAT_DATA.write() {
+            data.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                text: format!("```runsplash\n{}\n```", MOVERS_TEMPLATE.trim()),
+            });
+            data.is_streaming = false;
+        }
+        CHAT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.update_empty_state_visibility(cx);
+        self.sync_app_tabs(cx);
+        cx.redraw_all();
     }
 
     /// Construct an `OctosUiAgent` from the current process environment.
@@ -5090,6 +5099,19 @@ impl MatchEvent for App {
                             self.route_to_app(cx, "stock", "movers row tap");
                         }
                     }
+                    continue;
+                }
+                // A detail card's back button → return to the movers list.
+                if ev.starts_with("back") {
+                    if let Some(idx) = self
+                        .apps
+                        .iter()
+                        .position(|a| a.domain.as_deref() == Some("stock"))
+                    {
+                        self.foreground = idx;
+                    }
+                    self.render_movers_template(cx);
+                    log::info!("stock: back → movers list");
                     continue;
                 }
                 let key = pj.get("key").and_then(|v| v.as_str()).unwrap_or("count").to_owned();
