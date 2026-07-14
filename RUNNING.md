@@ -41,7 +41,7 @@ export DEEPSEEK_API_KEY=...     # or ANTHROPIC_API_KEY / OPENAI_API_KEY
 ```
 
 Notes: binds 127.0.0.1 (`octos/CLAUDE.md:147`); installer-service default is
-:8080 but on this machine `ominix-ap` holds :8080 — use 58080+.
+:8080 but if that port is already held locally, use 58080+.
 
 ## 3. First-run dialog (LoginScreen Step 1)
 
@@ -79,9 +79,6 @@ currently-running e2e/dev servers have `email_login_enabled: false`
   always returns `ok:true` (anti-enumeration) but `verify` rejects.
 - **`/api/sessions` per-profile** wants a real `X-Profile-Id`; bare list is
   `[]`, unknown profile is `503 Sessions not available`.
-- **Cloud `cloud@<CLOUD_HOST>` not reachable on :80/:443/:8080.**
-  Behind frps + Caddy on a tenant hostname; TODO ask user for
-  `<tenant>.octos-cloud.org` URL and per-tenant token, then reuse §1.
 
 ## 6. Probe cheatsheet
 
