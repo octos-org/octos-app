@@ -40,6 +40,13 @@ const OCTOS_PLACEHOLDER_SYSTEM_PROMPT: &str = "";
 /// client system-prompt field.
 const SPLASH_MANUAL: &str = include_str!("../../splash.md");
 
+/// The movers / top-gainers card is a fixed data-list TEMPLATE (10 rows × a
+/// 14-bar sparkline). It is rendered DIRECTLY rather than LLM-generated — an LLM
+/// can't faithfully reproduce ~140 `sys.stockbar` bars (it invents broken rows),
+/// but this template + live `sys.movers`/`sys.stockbar` data renders it exactly.
+/// Per-ticker DETAIL cards stay LLM-generated. See `route_to_app`/`is_movers_intent`.
+const MOVERS_TEMPLATE: &str = include_str!("movers_template.splash");
+
 /// Build the message actually sent to the LLM in Splash mode: instructions +
 /// the Splash manual + the user's request. The chat bubble still shows only
 /// the user's original `request` text.
@@ -69,6 +76,20 @@ generate a {domain} card: follow the apps/{domain}/app.md spec and its exemplar 
 your memory, and bind live data with the matching sys.* helper. Do NOT generate any \
 other app type.\n\nUser request: {intent}"
     )
+}
+
+/// True if a stock intent asks for the top-gainers LIST (render MOVERS_TEMPLATE
+/// directly) vs a single ticker's detail (LLM-generated). A movers-row tap sets
+/// the intent to the tapped SYMBOL (e.g. "SKHY"), which has no keyword → detail.
+fn is_movers_intent(intent: &str) -> bool {
+    let s = intent.to_ascii_lowercase();
+    [
+        "top ", "top10", "top 10", "best", "gainer", "mover", "most ", "performant",
+        "biggest", "watchlist", "leaderboard", "market list", "stock list", "涨幅",
+        "领涨", "表现最",
+    ]
+    .iter()
+    .any(|k| s.contains(k))
 }
 
 fn app_splash_prompt(request: &str) -> String {
@@ -3508,6 +3529,25 @@ impl App {
         self.foreground = idx;
         // New foreground → drop ChatList's render cache so the card re-parses.
         CHAT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A movers/top-gainers request is a fixed data-list TEMPLATE (10 rows ×
+        // a 14-bar sparkline). Render it DIRECTLY with live sys.movers/sys.stockbar
+        // data — the LLM can't faithfully reproduce ~140 bars. Per-ticker DETAIL
+        // requests (incl. a row tap, whose intent is the bare symbol) fall through
+        // to the agent below.
+        if app_id == "stock" && is_movers_intent(&intent) {
+            if let Ok(mut data) = CHAT_DATA.write() {
+                data.messages.push(ChatMessage {
+                    role: ChatRole::Assistant,
+                    text: format!("```runsplash\n{}\n```", MOVERS_TEMPLATE.trim()),
+                });
+                data.is_streaming = false;
+            }
+            self.update_empty_state_visibility(cx);
+            self.sync_app_tabs(cx);
+            cx.redraw_all();
+            log::info!("stock: rendered movers TEMPLATE directly (no LLM) | intent {intent:?}");
+            return;
+        }
         // Dispatch the domain-specialised generation prompt to the chosen agent.
         let sid = self.apps[idx].session_id;
         let prompt = app_splash_router_for(app_id, &intent);
