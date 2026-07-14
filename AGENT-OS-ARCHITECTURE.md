@@ -35,8 +35,10 @@ multi-session transport that will make it robust.
 - **Direct-to-window generation.** The routed domain agent emits the `runsplash` card **itself**
   as its streamed answer — the sub-agent relay (and its card-truncation bug) is gone.
 - **Per-appid memory injection.** `a2app/apps/<domain>/{app.md, exemplars/*.splash}` + shared
-  `framework.md`/`widgets/` are concatenated by `scripts/build_memory.py` into one `MEMORY.md`
-  the kernel injects each turn (cap `config.memory.max_inject_tokens = 16000`).
+  `framework.md`/`widgets/` are deployed as an `app-cards/` tree under the profile memory dir;
+  the octos kernel **assembles them itself at inject time** (`octos-memory` →
+  `assemble_app_cards`) — no build step, no generated `MEMORY.md` artifact (cap
+  `config.memory.max_inject_tokens = 16000`).
 - **Live-data binding.** Cards call `sys.weather/airquality/stock/stockbar/news` helpers that
   fetch real values at render time (open-meteo, Yahoo Finance, Hacker News) — the LLM writes
   `sys.stock("AAPL","price")`, never a number. Re-eval on data arrival via `DATA_FETCH_EPOCH`.
@@ -310,16 +312,16 @@ ambiguous input only. This removes the ~7 s AMA leg from the common path while p
 3 (*cheap, non-blocking routing*). The LLM AMA stays as the escape hatch, not the default.
 
 **R5 — Memory must be *per-domain*, not one global blob (the token-budget bug, formalized).**
-As-built, `scripts/build_memory.py` concatenates **every** app package into **one** `MEMORY.md`
-injected into **every** agent's every turn. Two real failures: **(a)** the stock agent carries the
-weather+news specs it never needs — breaks *isolation* and *"per-app context stays small"*;
-**(b)** `MEMORY.md` grows O(apps) and, past `config.memory.max_inject_tokens` (16000), the kernel
-silently drops the **tail** app — a data-loss cliff that gets worse with every app added. Refinement:
-**scope memory by domain** — each domain agent gets only `apps/<domain>/` + shared
+As-built, octos's `assemble_app_cards` (in `octos-memory`) concatenates **every** app package into
+**one** injected memory block for **every** agent's every turn. Two real failures: **(a)** the stock
+agent carries the weather+news specs it never needs — breaks *isolation* and *"per-app context stays
+small"*; **(b)** the block grows O(apps) and, past `config.memory.max_inject_tokens` (16000), the
+kernel silently drops the **tail** app — a data-loss cliff that gets worse with every app added.
+Refinement: **scope memory by domain** — each domain agent gets only `apps/<domain>/` + shared
 `framework.md`/`widgets/`; the **AMA** gets only a tiny **app registry** (`domain → one-line
-description`), never the card specs (it classifies, it doesn't generate). Near-term (no protocol
-change): a per-domain `MEMORY.md` under a per-domain profile, or client-side scoped injection into
-the domain agent's first message. Long-term: the §7 **app-package seed at `session/open`** carries
+description`), never the card specs (it classifies, it doesn't generate). Now that assembly lives in
+octos, this is a natural filter *inside* `assemble_app_cards` (select the active app subdir per
+session) — no build step to change. Long-term: the §7 **app-package seed at `session/open`** carries
 the memory scope. This is the concrete form of **principle 5**.
 
 **R6 — Two extension axes: app *packages* (content, no build) vs. data *capabilities* (shared native surface).**
