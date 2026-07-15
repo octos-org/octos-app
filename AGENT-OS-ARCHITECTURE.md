@@ -38,7 +38,7 @@ multi-session transport that will make it robust.
   `framework.md`/`widgets/` are deployed as an `app-cards/` tree under the profile memory dir;
   the octos kernel **assembles them itself at inject time** (`octos-memory` →
   `assemble_app_cards`) — no build step, no generated `MEMORY.md` artifact (cap
-  `config.memory.max_inject_tokens = 16000`).
+  `config.memory.max_inject_tokens = 40000`; the 3-app tree is already ~23k tokens).
 - **Live-data binding.** Cards call `sys.weather/airquality/stock/stockbar/news` helpers that
   fetch real values at render time (open-meteo, Yahoo Finance, Hacker News) — the LLM writes
   `sys.stock("AAPL","price")`, never a number. Re-eval on data arrival via `DATA_FETCH_EPOCH`.
@@ -315,8 +315,10 @@ ambiguous input only. This removes the ~7 s AMA leg from the common path while p
 As-built, octos's `assemble_app_cards` (in `octos-memory`) concatenates **every** app package into
 **one** injected memory block for **every** agent's every turn. Two real failures: **(a)** the stock
 agent carries the weather+news specs it never needs — breaks *isolation* and *"per-app context stays
-small"*; **(b)** the block grows O(apps) and, past `config.memory.max_inject_tokens` (16000), the
+small"*; **(b)** the block grows O(apps) and, past `config.memory.max_inject_tokens`, the
 kernel silently drops the **tail** app — a data-loss cliff that gets worse with every app added.
+(This cliff was HIT on 2026-07-14: the 3-app tree reached ~23k tokens against the then-16000 cap,
+silently dropping the entire weather section; interim fix = cap raised to 40000 on both phones.)
 Refinement: **scope memory by domain** — each domain agent gets only `apps/<domain>/` + shared
 `framework.md`/`widgets/`; the **AMA** gets only a tiny **app registry** (`domain → one-line
 description`), never the card specs (it classifies, it doesn't generate). Now that assembly lives in
