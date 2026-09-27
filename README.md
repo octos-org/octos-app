@@ -37,7 +37,7 @@ Read in order. The workstream docs assume you've internalized 00–05.
 
 ## Reference repos
 
-- `~/home/octos/` — Rust backend ("Open Cognitive Tasks Orchestration System"). 91 REST endpoints,
+- `~/home/octos/` — Rust backend ("Embeddable agent runtime"). 91 REST endpoints,
   multi-tenant, multi-LLM. The new contract lives in `crates/octos-core/src/ui_protocol.rs`.
 - `~/home/octos-web/` — React+TS+Vite frontend being replaced. Useful as a feature inventory and
   a record of which API endpoints are actually used in practice (~15 of 91).
