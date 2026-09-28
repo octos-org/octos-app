@@ -1,7 +1,7 @@
 # M9 UI Protocol v1 — Type-Design Review
 
-**File**: `/Users/yuechen/home/octos/crates/octos-core/src/ui_protocol.rs` (2,718 lines)
-**Spec**: `/Users/yuechen/home/octos/api/OCTOS_UI_PROTOCOL_V1_SPEC_2026-04-24.md`
+**File**: `~/home/octos/crates/octos-core/src/ui_protocol.rs` (2,718 lines)
+**Spec**: `~/home/octos/api/OCTOS_UI_PROTOCOL_V1_SPEC_2026-04-24.md`
 **Reviewer scope**: type-design only (versioning, serde, identity, errors, capabilities). Runtime correctness excluded.
 
 ## Verdict — amber, leaning red

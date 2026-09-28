@@ -1,6 +1,6 @@
 # Running octos-app — smoke-test runbook
 
-App binary: `/Users/yuechen/home/octos-app/target/debug/octos-app`
+App binary: `~/home/octos-app/target/debug/octos-app`
 (`cargo build -p octos-app`).
 
 ## 1. Quick start (dev token bypass — recommended)
@@ -17,7 +17,7 @@ cat > ~/.config/octos-app/server.json <<'JSON'
 JSON
 
 OCTOS_APP_TOKEN=<OCTOS_APP_TOKEN> \
-    /Users/yuechen/home/octos-app/target/debug/octos-app
+    ~/home/octos-app/target/debug/octos-app
 ```
 
 App boots straight to home — server URL + profile from `server.json`,
@@ -34,7 +34,7 @@ DATA=/tmp/octos-app-data; WORK=/tmp/octos-app-cwd
 mkdir -p "$DATA" "$WORK"
 export DEEPSEEK_API_KEY=...     # or ANTHROPIC_API_KEY / OPENAI_API_KEY
 
-/Users/yuechen/home/octos/target/release/octos serve \
+~/home/octos/target/release/octos serve \
     --host 127.0.0.1 --port "$PORT" --cwd "$WORK" --data-dir "$DATA" \
     --provider deepseek --model deepseek-v4-pro --auth-token "$TOKEN" \
     2>&1 | tee /tmp/octos-serve.log

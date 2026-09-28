@@ -7,7 +7,7 @@ W09 (build, packaging, release).
 
 | Metric | Value |
 |---|---|
-| Command | `cargo build --release -p octos-app` from `/Users/yuechen/home/octos-app` |
+| Command | `cargo build --release -p octos-app` from `~/home/octos-app` |
 | Wall time | **1m 25s** (cold incremental — full LTO link) |
 | User CPU | 81.34s |
 | Profile | `release` (`lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = "symbols"`) |

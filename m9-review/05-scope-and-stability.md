@@ -2,7 +2,7 @@
 
 ## Headline
 
-Branch `coding-green-m9-local-20260428` in `/Users/yuechen/home/octos` is a 17-commit, 280-file diff against `main`. By `git diff --stat`: **27,596 insertions / 48,764 deletions** (net **-21,168 lines**), but `git log --numstat` shows **30,252 added vs 620 deleted** real production deltas — the gap between the two is dominated by the deletion of `swarm-app/` (≈ 6,289 lines, 15 files including `package-lock.json` at 4,232 lines and a removed React app) and the rewrite/shrinkage of `octos-bus/api_channel.rs` (-2,620), `octos-bus/session.rs` (-1,712), and `octos-agent/src/agent/loop_runner.rs` (-1,200-ish). The bulk of net-new code (≈ +20 kLOC) is concentrated on the AppUi/UI Protocol v1 subsystem and its server handlers. **All 17 commits are date-stamped within the last 5 days (2026-04-24 → 2026-04-28)**, with **11 of them landed on 2026-04-28 alone** — most after a single large mega-commit `70c756d Add coding green M9 protocol and sandbox work`. The branch is genuinely fresh; over a third of last-day commits are TUI/tmux harness fix-forwards layered on top of that mega-commit. Test coverage on the new code is moderate (test:code = 0.22).
+Branch `coding-green-m9-local-20260428` in `~/home/octos` is a 17-commit, 280-file diff against `main`. By `git diff --stat`: **27,596 insertions / 48,764 deletions** (net **-21,168 lines**), but `git log --numstat` shows **30,252 added vs 620 deleted** real production deltas — the gap between the two is dominated by the deletion of `swarm-app/` (≈ 6,289 lines, 15 files including `package-lock.json` at 4,232 lines and a removed React app) and the rewrite/shrinkage of `octos-bus/api_channel.rs` (-2,620), `octos-bus/session.rs` (-1,712), and `octos-agent/src/agent/loop_runner.rs` (-1,200-ish). The bulk of net-new code (≈ +20 kLOC) is concentrated on the AppUi/UI Protocol v1 subsystem and its server handlers. **All 17 commits are date-stamped within the last 5 days (2026-04-24 → 2026-04-28)**, with **11 of them landed on 2026-04-28 alone** — most after a single large mega-commit `70c756d Add coding green M9 protocol and sandbox work`. The branch is genuinely fresh; over a third of last-day commits are TUI/tmux harness fix-forwards layered on top of that mega-commit. Test coverage on the new code is moderate (test:code = 0.22).
 
 ## Change Inventory by Area
 
@@ -43,7 +43,7 @@ Per-ticket status markers (`docs/OCTOS_M9_ISSUE_STACK_2026-04-24.md`):
 - M9.4 (Task output tail/read) — implemented; runtime disk-output caveat (260)
 - M9.5 (Rich progress schema) — implemented (290)
 - M9.6 (Unified ledger) — implemented as bounded in-memory ledger (316)
-- M9.7 (octos-tui MVP) — sibling repo `/Users/yuechen/home/octos-tui` (350)
+- M9.7 (octos-tui MVP) — sibling repo `~/home/octos-tui` (350)
 - M9.8 (broad web migration) — held (378)
 - M9.9 (tmux harness) — implemented, all 7 sub-issues signed off (420)
 - M9.10–M9.13 (sandbox parity) — implementation+test evidence (line 103)

@@ -1,12 +1,12 @@
 # M9 Review — Tests & Issues
 
-Date: 2026-04-28. Reviewer scope: `/Users/yuechen/home/octos/e2e/tests/` (M9-era specs on `coding-green-m9-local-20260428`) plus open GitHub issues against the M9 family.
+Date: 2026-04-28. Reviewer scope: `~/home/octos/e2e/tests/` (M9-era specs on `coding-green-m9-local-20260428`) plus open GitHub issues against the M9 family.
 
 ## Verdict
 
 **RED on test reliability for the M9 *protocol* surface; AMBER on bug burden.**
 
-The 8 specs labeled "M9-era" don't actually exercise the UI Protocol v1 wire methods (`session/open`, `turn/start`, `turn/interrupt`, `approval/respond`, `diff/preview/get`, `task/output/read`, `tool/started`, `tool/completed`, `task/updated`, `turn/completed`, `message/delta`). They drive the legacy SSE `/api/chat` surface (M8 + M8.10) and assert against the rendered DOM. The new wire methods exist only in `crates/octos-core/src/ui_protocol.rs` (Rust unit tests for JSON shape) and have **no live integration test, no fault-injection test, no double-call/cursor-stale/cursor-future probe, and no e2e probe** — only a tmux-driven `octos-tui --readonly` smoke test (`/Users/yuechen/home/octos/e2e/tmux/run.sh`) that verifies the TUI binary connects. Calling the M9 protocol "stable" today would be premature.
+The 8 specs labeled "M9-era" don't actually exercise the UI Protocol v1 wire methods (`session/open`, `turn/start`, `turn/interrupt`, `approval/respond`, `diff/preview/get`, `task/output/read`, `tool/started`, `tool/completed`, `task/updated`, `turn/completed`, `message/delta`). They drive the legacy SSE `/api/chat` surface (M8 + M8.10) and assert against the rendered DOM. The new wire methods exist only in `crates/octos-core/src/ui_protocol.rs` (Rust unit tests for JSON shape) and have **no live integration test, no fault-injection test, no double-call/cursor-stale/cursor-future probe, and no e2e probe** — only a tmux-driven `octos-tui --readonly` smoke test (`~/home/octos/e2e/tmux/run.sh`) that verifies the TUI binary connects. Calling the M9 protocol "stable" today would be premature.
 
 ## Test coverage matrix (M9 wire surface)
 
@@ -60,7 +60,7 @@ The closest fault-injection tests are M8-era: workspace-deletion mid-session in 
 
 - Live (against real `octos serve` on `dspfac.{crew,bot,octos,river,ocean}.ominix.io`): **all 8 M9-era specs + 25 other live specs**. SSH-host-pinned via `HOST_MAP`; serial `--workers=1`; LLM rate-limited.
 - Mocked WS server: **zero specs**. Playwright `routeWebSocket` API exists in `node_modules` but is unused by any spec.
-- Tmux-driven: `octos-tui` connects to `ws://127.0.0.1:9/api/ui-protocol/ws` in read-only mode and verifies CLI help / banner — log artefacts under `/Users/yuechen/home/octos/e2e/test-results-tmux/`. This is the only test that touches the M9 protocol path at all, and only as a connect-and-print smoke test.
+- Tmux-driven: `octos-tui` connects to `ws://127.0.0.1:9/api/ui-protocol/ws` in read-only mode and verifies CLI help / banner — log artefacts under `~/home/octos/e2e/test-results-tmux/`. This is the only test that touches the M9 protocol path at all, and only as a connect-and-print smoke test.
 
 ## Open issue bucket A — M9 protocol bugs (all open, recent)
 
