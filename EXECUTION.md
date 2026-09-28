@@ -126,7 +126,7 @@ Tracked in `app/STATUS.md` — these did not block M1 but should land in M2.
 ```bash
 # Quick smoke (against the running e2e server you can find with `pgrep -f octos`)
 OCTOS_APP_TOKEN="<token from e2e/test-results-tui-coding-ux/.../run-octos-tui-server.sh>" \
-  /Users/yuechen/home/octos-app/target/debug/octos-app
+  ~/home/octos-app/target/debug/octos-app
 ```
 
 See `RUNNING.md` for the long version.

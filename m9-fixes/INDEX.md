@@ -10,7 +10,7 @@ executed in parallel by the agent swarm with minimal cross-workstream contention
 | | |
 |---|---|
 | Branch | `coding-green-m9-local-20260428` (HEAD `0b8c8434` at 2026-04-28) |
-| Working dir | `/Users/yuechen/home/octos` |
+| Working dir | `~/home/octos` |
 | Reviews referenced | `~/home/octos-app/m9-review/00-VERDICT.md` + `01..05` |
 | Total workstreams | 10 (`M9-FIX-01..10`) |
 | Blocker fixes | M9-FIX-01, 02, 03, 06, 09 |

@@ -42,7 +42,7 @@
 
 ## Test coverage gaps
 
-- No e2e tests touch approvals at all (`grep approval /Users/yuechen/home/octos/e2e/tests/*.ts` returns nothing).
+- No e2e tests touch approvals at all (`grep approval ~/home/octos/e2e/tests/*.ts` returns nothing).
 - Unit tests cover idempotent double-respond, cross-session probe, reconnect-replay-of-request — solid for what's there. But missing: 
   - scope enforcement (would fail because not implemented),
   - `approval/respond` after `turn/interrupt` (concern #5 / scenario B),
